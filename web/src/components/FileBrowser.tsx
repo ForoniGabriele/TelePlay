@@ -1,7 +1,7 @@
 /**
  * Main FileBrowser component - the core of the web interface
  */
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useCallback, useRef, useState, useMemo } from 'react';
 import { FolderPlus, Grid, List, Search, ChevronRight, Home, RefreshCw, Clipboard, ArrowUp, Film, Music, Image as ImageIcon, FileText, Menu } from 'lucide-react';
 import { useFiles, useFolders, useUpdateFile, useUpdateFolder, useDeleteFolder, useDeleteFiles, useMoveFiles, TelegramFile, Folder, useRecentFiles, useContinueWatching, useDeleteFolders, useMoveFolders } from '../lib/api';
 import { useAppStore } from '../lib/store';
@@ -58,6 +58,9 @@ export default function FileBrowser() {
     const [hasMore, setHasMore] = useState(true);
     const [allFiles, setAllFiles] = useState<TelegramFile[]>([]);
 
+    // Sorting state
+    const [sortBy, setSortBy] = useState<'default' | 'name_asc' | 'name_desc'>('default');
+
     // Data Fetching
     const { data: filesList, isLoading: filesLoading, refetch: refetchFiles } = useFiles(currentFolderId, fileTypeFilter || undefined, searchQuery || undefined, page);
     const { data: recentFiles, isLoading: recentLoading, refetch: refetchRecent } = useRecentFiles(50);
@@ -97,6 +100,31 @@ export default function FileBrowser() {
 
     // Combined loading state
     isLoading = isLoading || (activeSection === 'files' && foldersLoading);
+
+    // Natural sort (E2 comes before E10)
+    const collator = useMemo(
+        () => new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }),
+        []
+    );
+
+    const sortedFiles = useMemo(() => {
+        if (!displayFiles || sortBy === 'default') return displayFiles;
+        const arr = [...displayFiles];
+        arr.sort((a, b) => collator.compare(a.file_name, b.file_name));
+        if (sortBy === 'name_desc') arr.reverse();
+        return arr;
+    }, [displayFiles, sortBy, collator]);
+
+    const sortedFolders = useMemo(() => {
+        if (!folders || sortBy === 'default') return folders;
+        const arr = [...folders];
+        arr.sort((a, b) => collator.compare(a.name, b.name));
+        if (sortBy === 'name_desc') arr.reverse();
+        return arr;
+    }, [folders, sortBy, collator]);
+
+    // From here on, everything uses the sorted list
+    displayFiles = sortedFiles;
     
     // Mutations
     const deleteFilesMutation = useDeleteFiles();
@@ -565,6 +593,18 @@ export default function FileBrowser() {
                                 <FileText className="w-4 h-4" />
                             </button>
                         </div>
+
+                        {/* Sort dropdown */}
+                        <select
+                            value={sortBy}
+                            onChange={(e) => setSortBy(e.target.value as 'default' | 'name_asc' | 'name_desc')}
+                            title="Sort"
+                            className="bg-dark-800/50 border border-white/[0.06] rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-primary-500/50"
+                        >
+                            <option value="default" className="bg-dark-900">Upload order</option>
+                            <option value="name_asc" className="bg-dark-900">Name A-Z</option>
+                            <option value="name_desc" className="bg-dark-900">Name Z-A</option>
+                        </select>
  
                          <div className="flex items-center gap-1 bg-dark-800/50 rounded-lg p-0.5 border border-white/[0.06]">
                              <button
@@ -640,7 +680,7 @@ export default function FileBrowser() {
                                     : 'flex flex-col gap-2 pb-20'
                                 }>
                                     {/* Folders */}
-                                    {showFolders && folders?.map((folder) => (
+                                    {showFolders && sortedFolders?.map((folder) => (
                                         <FolderCard
                                             key={folder.id}
                                             folder={folder}

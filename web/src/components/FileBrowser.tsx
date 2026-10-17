@@ -59,7 +59,7 @@ export default function FileBrowser() {
     const [allFiles, setAllFiles] = useState<TelegramFile[]>([]);
 
     // Sorting state
-    const [sortBy, setSortBy] = useState<'default' | 'name_asc' | 'name_desc'>('default');
+    const [sortBy, setSortBy] = useState<'default' | 'name_asc' | 'name_desc'>('name_asc');
 
     // Data Fetching
     const { data: filesList, isLoading: filesLoading, refetch: refetchFiles } = useFiles(currentFolderId, fileTypeFilter || undefined, searchQuery || undefined, page);
@@ -601,8 +601,8 @@ export default function FileBrowser() {
                             title="Sort"
                             className="bg-dark-800/50 border border-white/[0.06] rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-primary-500/50"
                         >
-                            <option value="name_asc" className="bg-dark-900">Name A-Z</option>
                             <option value="default" className="bg-dark-900">Upload order</option>
+                            <option value="name_asc" className="bg-dark-900">Name A-Z</option>
                             <option value="name_desc" className="bg-dark-900">Name Z-A</option>
                         </select>
  

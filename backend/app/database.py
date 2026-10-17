@@ -23,12 +23,12 @@ elif url.drivername == "sqlite":
     url = url.set(drivername="sqlite+aiosqlite")
 
 engine = create_async_engine(
-    url, 
+    url,
     echo=False,
     pool_pre_ping=True,
-    pool_recycle=1800,  # Recycle connections every 30 minutes
-    pool_size=40,       # Increased pool size for high concurrency
-    max_overflow=20     # Allow more overflow connections
+    pool_recycle=300,   # Recycle connections every 5 minutes
+    pool_size=3,        # Supabase free: max 15 clients in session mode
+    max_overflow=2,     # At most 5 connections in total
 )
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

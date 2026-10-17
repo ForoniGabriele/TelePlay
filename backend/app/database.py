@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.engine import make_url
 from .config import get_settings
+from uuid import uuid4
 
 settings = get_settings()
 
@@ -26,9 +27,14 @@ engine = create_async_engine(
     url,
     echo=False,
     pool_pre_ping=True,
-    pool_recycle=300,   # Recycle connections every 5 minutes
-    pool_size=3,        # Supabase free: max 15 clients in session mode
-    max_overflow=2,     # At most 5 connections in total
+    pool_recycle=300,
+    pool_size=3,
+    max_overflow=2,
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid4()}__",
+    },
 )
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

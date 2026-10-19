@@ -1,5 +1,7 @@
 /**
  * MediaPlayer - full screen video/audio player
+ * Video: uses the browser's NATIVE controls (<video controls>)
+ * Audio: keeps the custom UI
  */
 import { useRef, useEffect, useState, useCallback } from 'react';
 import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipForward, Download, ExternalLink, AlertTriangle, Copy, PictureInPicture2, Gauge, ChevronDown, ChevronUp } from 'lucide-react';
@@ -37,6 +39,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [error, setError] = useState<string | null>(null);
     const hideControlsTimeout = useRef<ReturnType<typeof setTimeout>>();
     const [publicUrl, setPublicUrl] = useState<string | null>(null);
+    const resumeApplied = useRef(false);
 
     // Fetch fresh file details to get latest progress
     const { data: extendedFile } = useFile(file.id);
@@ -64,15 +67,27 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         ensurePublicLink();
     }, [file.id, extendedFile]);
 
-    // Restore progress
+    // Reset resume flag when the file changes
     useEffect(() => {
-        if (videoRef.current && extendedFile?.last_pos && !currentTime) {
-            if (extendedFile.last_pos < (extendedFile.duration || 0) * 0.95) {
-                videoRef.current.currentTime = extendedFile.last_pos;
-                setCurrentTime(extendedFile.last_pos);
-            }
+        resumeApplied.current = false;
+    }, [file.id]);
+
+    // Restore progress (applied once, as soon as metadata is available)
+    const applyResume = useCallback(() => {
+        const el = videoRef.current;
+        if (!el || resumeApplied.current || !extendedFile?.last_pos) return;
+        if (el.readyState < 1) return; // metadata not loaded yet
+        const totalDuration = extendedFile.duration || el.duration || 0;
+        if (extendedFile.last_pos < totalDuration * 0.95) {
+            el.currentTime = extendedFile.last_pos;
+            setCurrentTime(extendedFile.last_pos);
         }
+        resumeApplied.current = true;
     }, [extendedFile]);
+
+    useEffect(() => {
+        applyResume();
+    }, [applyResume]);
 
     // Save progress periodically
     useEffect(() => {
@@ -105,16 +120,21 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         return () => saveProgress();
     }, [saveProgress]);
 
+    // Play/pause state follows the real media element events
+    const handlePlay = () => setIsPlaying(true);
+    const handlePause = () => {
+        setIsPlaying(false);
+        saveProgress();
+    };
+
     const togglePlay = (e?: any) => {
         e?.stopPropagation();
-        if (videoRef.current) {
-            if (isPlaying) {
-                videoRef.current.pause();
-                saveProgress();
-            } else {
-                videoRef.current.play();
-            }
-            setIsPlaying(!isPlaying);
+        const el = videoRef.current;
+        if (!el) return;
+        if (el.paused) {
+            el.play().catch(() => {});
+        } else {
+            el.pause();
         }
     };
 
@@ -165,6 +185,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         if (videoRef.current) {
             setDuration(videoRef.current.duration);
             setIsLoading(false);
+            applyResume();
         }
     };
 
@@ -206,6 +227,13 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         }
     };
 
+    // Keep fullscreen state in sync (also when the user exits with the browser UI)
+    useEffect(() => {
+        const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+        document.addEventListener('fullscreenchange', onFsChange);
+        return () => document.removeEventListener('fullscreenchange', onFsChange);
+    }, []);
+
     // Keyboard controls
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -234,13 +262,9 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                     toggleFullscreen();
                     break;
                 case 'Escape':
-                    if (isFullscreen) {
+                    if (document.fullscreenElement) {
                         document.exitFullscreen();
                     } else if (!isMinimized) {
-                        // If full screen mode (not minimized), esc minimizes? or closes?
-                        // Standard behavior: ESC closes modal. 
-                        // But for music we might want minimize.
-                        // Let's stick to close on ESC for now, user can minimize via button.
                         onClose();
                     }
                     break;
@@ -249,7 +273,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isFullscreen, onClose, error, isPlaying, isMinimized]);
+    }, [isFullscreen, onClose, error, isPlaying, isMinimized, isMuted]);
 
     const handleMouseMove = () => {
         setShowControls(true);
@@ -264,7 +288,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     // Auto-play effect
     useEffect(() => {
         if (videoRef.current && !error) {
-            videoRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+            videoRef.current.play().catch(() => {});
         }
     }, [error, file.id]); // Re-run when file changes
 
@@ -292,20 +316,24 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         <video
             ref={videoRef}
             src={authorizedStreamUrl}
-            className={`max-w-full max-h-full w-full h-full object-contain ${isMinimized ? 'hidden' : ''}`}
-            onClick={togglePlay}
+            className={`max-w-full max-h-full w-full h-full object-contain bg-black ${isMinimized ? 'hidden' : ''}`}
+            onPlay={handlePlay}
+            onPause={handlePause}
             onTimeUpdate={handleTimeUpdate}
             onLoadedMetadata={handleLoadedMetadata}
             onWaiting={handleWaiting}
             onPlaying={handlePlaying}
             onError={handleError}
-            controls={false}
+            controls
+            preload="metadata"
             playsInline
         />
     ) : (
         <audio
             ref={videoRef as React.RefObject<HTMLAudioElement>}
             src={authorizedStreamUrl}
+            onPlay={handlePlay}
+            onPause={handlePause}
             onTimeUpdate={handleTimeUpdate}
             onLoadedMetadata={handleLoadedMetadata}
             onWaiting={handleWaiting}
@@ -313,6 +341,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             onError={handleError}
         />
     );
+
+    const overlayVisible = showControls || !isPlaying;
 
     // Unified Render
     return (
@@ -324,7 +354,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                     : 'inset-0 bg-black flex items-center justify-center font-sans'
             }`}
             onMouseMove={!isMinimized ? handleMouseMove : undefined}
-            onDoubleClick={!isMinimized ? toggleFullscreen : undefined}
+            onDoubleClick={!isMinimized && !isVideo ? toggleFullscreen : undefined}
         >
             {/* Media Element - Always present */}
             <div className={`w-full h-full ${isMinimized ? 'hidden' : 'flex items-center justify-center'}`}>
@@ -462,14 +492,18 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 </div>
             )}
 
-            {/* Fullscreen Controls overlay */}
+            {/* Overlay: top bar for everything, custom controls only for audio */}
             {!error && !isMinimized && (
                 <div
-                    className={`absolute inset-0 transition-opacity duration-300 ${showControls || !isPlaying ? 'opacity-100' : 'opacity-0 cursor-none'}`}
-                    style={{ pointerEvents: showControls || !isPlaying ? 'auto' : 'none' }}
+                    className={`absolute inset-0 transition-opacity duration-300 ${overlayVisible ? 'opacity-100' : 'opacity-0'} ${!isVideo && !overlayVisible ? 'cursor-none' : ''}`}
+                    // For video the overlay must never block the native controls underneath
+                    style={{ pointerEvents: isVideo ? 'none' : (overlayVisible ? 'auto' : 'none') }}
                 >
                     {/* Top bar */}
-                    <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 to-transparent flex items-start justify-between z-30">
+                    <div
+                        className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 to-transparent flex items-start justify-between z-30"
+                        style={{ pointerEvents: overlayVisible ? 'auto' : 'none' }}
+                    >
                         <div>
                             <h3 className="text-lg font-medium truncate max-w-lg text-white">{file.file_name}</h3>
                             {((extendedFile?.last_pos || 0) > 0) && currentTime < 5 && (
@@ -493,130 +527,134 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     </div>
 
-                    {/* Center large controls */}
-                    <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex items-center gap-8 z-30">
-                        <button
-                            onClick={(e) => { e.stopPropagation(); handleSkip(-10); }}
-                            className="p-4 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-all"
-                        >
-                            <SkipBack className="w-8 h-8" />
-                        </button>
-
-                        <button
-                            onClick={(e) => { e.stopPropagation(); togglePlay(); }}
-                            className="w-20 h-20 bg-white/20 backdrop-blur rounded-full flex items-center justify-center hover:bg-white/30 transition-all scale-100 hover:scale-105"
-                        >
-                            {isPlaying ? (
-                                <Pause className="w-10 h-10 text-white" />
-                            ) : (
-                                <Play className="w-10 h-10 ml-1 text-white" />
-                            )}
-                        </button>
-
-                        <button
-                            onClick={(e) => { e.stopPropagation(); handleSkip(10); }}
-                            className="p-4 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-all"
-                        >
-                            <SkipForward className="w-8 h-8" />
-                        </button>
-                    </div>
-
-                    {/* Bottom controls */}
-                    <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30">
-                        {/* Progress bar */}
-                        <div className="flex items-center gap-4 mb-4 group/progress">
-                            <span className="text-sm font-medium text-white/90 min-w-[50px] font-mono">{formatDuration(Math.floor(currentTime))}</span>
-                            <div className="relative flex-1 h-1 bg-white/20 rounded-full cursor-pointer group-hover/progress:h-2 transition-all">
-                                {/* Buffered progress can be added here */}
-                                <div
-                                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary-500 to-primary-400 rounded-full transition-all"
-                                    style={{ width: `${progressPercent}%` }}
-                                >
-                                    <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-4 h-4 bg-white rounded-full opacity-0 group-hover/progress:opacity-100 transition-all shadow-lg shadow-primary-500/50 scale-75 group-hover/progress:scale-100"></div>
-                                </div>
-                                <input
-                                    type="range"
-                                    min={0}
-                                    max={duration || 100}
-                                    value={currentTime}
-                                    onChange={handleSeek}
-                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                                />
-                            </div>
-                            <span className="text-sm font-medium text-white/90 min-w-[50px] text-right font-mono">{formatDuration(Math.floor(duration))}</span>
-                        </div>
-
-                        {/* Control buttons */}
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
+                    {/* Custom controls: AUDIO ONLY (video uses native controls) */}
+                    {!isVideo && (
+                        <>
+                            {/* Center large controls */}
+                            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex items-center gap-8 z-30">
                                 <button
-                                    onClick={togglePlay}
-                                    className="p-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all hover:scale-105"
+                                    onClick={(e) => { e.stopPropagation(); handleSkip(-10); }}
+                                    className="p-4 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-all"
                                 >
-                                    {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
+                                    <SkipBack className="w-8 h-8" />
                                 </button>
 
-                                {/* Volume */}
-                                <div className="flex items-center gap-2 group/vol">
-                                    <button
-                                        onClick={toggleMute}
-                                        className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all"
-                                    >
-                                        {isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-                                    </button>
-                                    <div className="w-0 overflow-hidden group-hover/vol:w-24 transition-all duration-300">
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); togglePlay(); }}
+                                    className="w-20 h-20 bg-white/20 backdrop-blur rounded-full flex items-center justify-center hover:bg-white/30 transition-all scale-100 hover:scale-105"
+                                >
+                                    {isPlaying ? (
+                                        <Pause className="w-10 h-10 text-white" />
+                                    ) : (
+                                        <Play className="w-10 h-10 ml-1 text-white" />
+                                    )}
+                                </button>
+
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); handleSkip(10); }}
+                                    className="p-4 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-all"
+                                >
+                                    <SkipForward className="w-8 h-8" />
+                                </button>
+                            </div>
+
+                            {/* Bottom controls */}
+                            <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30">
+                                {/* Progress bar */}
+                                <div className="flex items-center gap-4 mb-4 group/progress">
+                                    <span className="text-sm font-medium text-white/90 min-w-[50px] font-mono">{formatDuration(Math.floor(currentTime))}</span>
+                                    <div className="relative flex-1 h-1 bg-white/20 rounded-full cursor-pointer group-hover/progress:h-2 transition-all">
+                                        <div
+                                            className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary-500 to-primary-400 rounded-full transition-all"
+                                            style={{ width: `${progressPercent}%` }}
+                                        >
+                                            <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-4 h-4 bg-white rounded-full opacity-0 group-hover/progress:opacity-100 transition-all shadow-lg shadow-primary-500/50 scale-75 group-hover/progress:scale-100"></div>
+                                        </div>
                                         <input
                                             type="range"
                                             min={0}
-                                            max={1}
-                                            step={0.05}
-                                            value={isMuted ? 0 : volume}
-                                            onChange={handleVolumeChange}
-                                            className="w-20 h-1 bg-white/30 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-lg"
+                                            max={duration || 100}
+                                            value={currentTime}
+                                            onChange={handleSeek}
+                                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                                         />
+                                    </div>
+                                    <span className="text-sm font-medium text-white/90 min-w-[50px] text-right font-mono">{formatDuration(Math.floor(duration))}</span>
+                                </div>
+
+                                {/* Control buttons */}
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-3">
+                                        <button
+                                            onClick={togglePlay}
+                                            className="p-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all hover:scale-105"
+                                        >
+                                            {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
+                                        </button>
+
+                                        {/* Volume */}
+                                        <div className="flex items-center gap-2 group/vol">
+                                            <button
+                                                onClick={toggleMute}
+                                                className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all"
+                                            >
+                                                {isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+                                            </button>
+                                            <div className="w-0 overflow-hidden group-hover/vol:w-24 transition-all duration-300">
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={1}
+                                                    step={0.05}
+                                                    value={isMuted ? 0 : volume}
+                                                    onChange={handleVolumeChange}
+                                                    className="w-20 h-1 bg-white/30 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-lg"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-2">
+                                        {/* Speed */}
+                                        <button
+                                            onClick={cycleSpeed}
+                                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${playbackSpeed !== 1
+                                                ? 'bg-primary-500/30 text-primary-300 border border-primary-500/40'
+                                                : 'bg-white/10 text-white/80 border border-white/10 hover:bg-white/20 hover:text-white'
+                                                }`}
+                                            title="Playback Speed"
+                                        >
+                                            <Gauge className="w-4 h-4" />
+                                            <span>{playbackSpeed}x</span>
+                                        </button>
+
+                                        {/* PiP */}
+                                        {isVideo && document.pictureInPictureEnabled && (
+                                            <button
+                                                onClick={togglePiP}
+                                                className={`p-2 rounded-lg transition-all ${isPiP
+                                                    ? 'bg-primary-500/30 text-primary-300'
+                                                    : 'hover:bg-white/10 text-white/80 hover:text-white'
+                                                    }`}
+                                                title="Picture in Picture"
+                                            >
+                                                <PictureInPicture2 className="w-5 h-5" />
+                                            </button>
+                                        )}
+
+                                        {/* Fullscreen */}
+                                        <button
+                                            onClick={toggleFullscreen}
+                                            className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all"
+                                            title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                                        >
+                                            {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+                                        </button>
                                     </div>
                                 </div>
                             </div>
-
-                            <div className="flex items-center gap-2">
-                                {/* Speed */}
-                                <button
-                                    onClick={cycleSpeed}
-                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${playbackSpeed !== 1
-                                        ? 'bg-primary-500/30 text-primary-300 border border-primary-500/40'
-                                        : 'bg-white/10 text-white/80 border border-white/10 hover:bg-white/20 hover:text-white'
-                                        }`}
-                                    title="Playback Speed"
-                                >
-                                    <Gauge className="w-4 h-4" />
-                                    <span>{playbackSpeed}x</span>
-                                </button>
-
-                                {/* PiP */}
-                                {isVideo && document.pictureInPictureEnabled && (
-                                    <button
-                                        onClick={togglePiP}
-                                        className={`p-2 rounded-lg transition-all ${isPiP
-                                            ? 'bg-primary-500/30 text-primary-300'
-                                            : 'hover:bg-white/10 text-white/80 hover:text-white'
-                                            }`}
-                                        title="Picture in Picture"
-                                    >
-                                        <PictureInPicture2 className="w-5 h-5" />
-                                    </button>
-                                )}
-
-                                {/* Fullscreen */}
-                                <button
-                                    onClick={toggleFullscreen}
-                                    className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all"
-                                    title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-                                >
-                                    {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
-                                </button>
-                            </div>
-                        </div>
-                    </div>
+                        </>
+                    )}
                 </div>
             )}
         </div>

@@ -119,7 +119,7 @@ function FolderTreeItem({ folder, selectedId, onSelect, depth }: {
     onSelect: (id: number) => void;
     depth: number;
 }) {
-    const [expanded, setExpanded] = useState(true);
+    const [expanded, setExpanded] = useState(false);
     const hasChildren = folder.children && folder.children.length > 0;
 
     return (

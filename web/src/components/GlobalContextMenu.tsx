@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../lib/store';
 import { TelegramFile, Folder, api } from '../lib/api';
-import { Play, Download, Link, Edit, FolderInput, Trash2, Globe, ShieldOff, HardDriveDownload } from 'lucide-react';
+import { Play, Download, Link, Edit, FolderInput, Trash2, Globe, ShieldOff, HardDriveDownload, Image as ImageIcon } from 'lucide-react';
 
 export default function GlobalContextMenu() {
-    const { activeContextMenu, setActiveContextMenu, setPreviewFile, setMoveItems, setMoveFiles, setDeleteConfirm, setRenameFile, setRenameFolder, selectedFileIds, selectedFiles } = useAppStore();
+    const { activeContextMenu, setActiveContextMenu, setPreviewFile, setMoveItems, setMoveFiles, setDeleteConfirm, setRenameFile, setRenameFolder, setCoverFolder, selectedFileIds, selectedFiles } = useAppStore();
     const menuRef = useRef<HTMLDivElement>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -249,6 +249,13 @@ export default function GlobalContextMenu() {
                 ) : (
                     // Folder Context Menu
                     <>
+                        <button
+                            className="context-menu-item w-full text-left"
+                            onClick={() => handleAction(() => setCoverFolder(activeContextMenu.item as Folder))}
+                        >
+                            <ImageIcon className="w-4 h-4 text-primary-400" />
+                            {(activeContextMenu.item as Folder).cover_url ? 'Change Cover' : 'Set Cover Image'}
+                        </button>
                         <button
                             className="context-menu-item w-full text-left"
                             onClick={() => handleAction(() => setRenameFolder(activeContextMenu.item as Folder))}

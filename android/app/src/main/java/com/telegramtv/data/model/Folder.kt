@@ -14,7 +14,9 @@ data class Folder(
     @SerializedName("updated_at") val updatedAt: String,
     // Optional: file count and preview files for home screen
     @SerializedName("file_count") val fileCount: Int? = null,
-    @SerializedName("preview_files") val previewFiles: List<FileItem>? = null
+    @SerializedName("preview_files") val previewFiles: List<FileItem>? = null,
+    @SerializedName("cover_file_id") val coverFileId: String? = null,
+    @SerializedName("cover_url") val coverUrl: String? = null
 )
 
 /**
@@ -26,6 +28,7 @@ data class FolderDetail(
     @SerializedName("files") val files: List<FileItem>,
     @SerializedName("parent_path") val parentPath: List<Folder>?
 )
+
 /**
  * Folder with children for recursive tree views.
  */
@@ -37,5 +40,7 @@ data class FolderWithChildren(
     @SerializedName("created_at") val createdAt: String,
     @SerializedName("updated_at") val updatedAt: String,
     @SerializedName("file_count") val fileCount: Int,
+    @SerializedName("cover_file_id") val coverFileId: String? = null,
+    @SerializedName("cover_url") val coverUrl: String? = null,
     @SerializedName("children") val children: List<FolderWithChildren>
 )

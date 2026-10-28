@@ -41,6 +41,7 @@ class FolderCreate(FolderBase):
 class FolderUpdate(BaseModel):
     name: Optional[str] = None
     parent_id: Optional[int] = None
+    cover_file_id: Optional[str] = None
 
 
 class FolderResponse(FolderBase):
@@ -49,6 +50,8 @@ class FolderResponse(FolderBase):
     created_at: datetime
     updated_at: datetime
     file_count: int = 0
+    cover_file_id: Optional[str] = None
+    cover_url: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
 

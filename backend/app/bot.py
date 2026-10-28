@@ -751,7 +751,8 @@ async def handle_callback(client, callback: CallbackQuery):
             )
             files = files_result.scalars().all()
         
-        text = f"📂 **{folder.name}**\n\n"
+        cover_status = "🖼 **Cover:** Set ✅\n\n" if folder.cover_file_id else ""
+        text = f"📂 **{folder.name}**\n{cover_status}"
         
         if not files:
             text += "__No files in this folder__\n"
@@ -762,12 +763,20 @@ async def handle_callback(client, callback: CallbackQuery):
             text += "💡 Use /file <id> to manage a file"
         
         # Add folder management buttons
+        cover_btn = (
+            InlineKeyboardButton("🗑 Rem Cover", callback_data=f"remcoverfolder:{folder_id}")
+            if folder.cover_file_id
+            else InlineKeyboardButton("🖼 Set Cover", callback_data=f"setcoverfolder:{folder_id}")
+        )
         buttons = [
             [
                 InlineKeyboardButton("✏️ Rename", callback_data=f"renamefolder:{folder_id}"),
-                InlineKeyboardButton("🗑 Delete", callback_data=f"delfolder:{folder_id}"),
+                cover_btn,
             ],
-            [InlineKeyboardButton("« Back to Folders", callback_data="back_folders")]
+            [
+                InlineKeyboardButton("🗑 Delete", callback_data=f"delfolder:{folder_id}"),
+                InlineKeyboardButton("« Back", callback_data="back_folders"),
+            ]
         ]
         
         await callback.message.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -1019,6 +1028,66 @@ async def handle_callback(client, callback: CallbackQuery):
         except Exception as e:
             if "timeout" in str(e).lower():
                 await callback.message.reply("⏱ Timed out. Please try again.")
+
+    elif data.startswith("setcoverfolder:"):
+        folder_id = int(data.split(":")[1])
+        async with async_session() as db:
+            result = await db.execute(select(Folder).where(Folder.id == folder_id))
+            folder = result.scalar_one_or_none()
+            if not folder:
+                await callback.answer("Folder not found", show_alert=True)
+                return
+            folder_name = folder.name
+        
+        await callback.message.reply(
+            f"🖼 **Set Folder Cover**\n\n"
+            f"Folder: `{folder_name}`\n\n"
+            "Please send an image to set as the folder cover:\n"
+            "__(or send /cancel to abort)__"
+        )
+        await callback.answer()
+        
+        try:
+            reply = await client.wait_for_message(
+                chat_id=callback.message.chat.id,
+                timeout=60
+            )
+            if reply.text and reply.text.startswith("/cancel"):
+                await reply.reply("❌ Cover upload cancelled.")
+                return
+            
+            if not reply.photo:
+                await reply.reply("❌ Please send an image (photo).")
+                return
+            
+            photo_file_id = reply.photo[-1].file_id
+            async with async_session() as db:
+                result = await db.execute(select(Folder).where(Folder.id == folder_id))
+                folder = result.scalar_one_or_none()
+                if folder:
+                    folder.cover_file_id = photo_file_id
+                    folder.updated_at = datetime.utcnow()
+                    await db.commit()
+                    await reply.reply(f"✅ Cover image set for folder **{folder_name}**!")
+                else:
+                    await reply.reply("❌ Folder not found.")
+        except Exception as e:
+            if "timeout" in str(e).lower():
+                await callback.message.reply("⏱ Timed out. Please try again.")
+
+    elif data.startswith("remcoverfolder:"):
+        folder_id = int(data.split(":")[1])
+        async with async_session() as db:
+            result = await db.execute(select(Folder).where(Folder.id == folder_id))
+            folder = result.scalar_one_or_none()
+            if folder:
+                folder.cover_file_id = None
+                folder.updated_at = datetime.utcnow()
+                await db.commit()
+                await callback.answer("Cover removed", show_alert=True)
+                await callback.message.reply(f"✅ Cover removed for folder **{folder.name}**")
+            else:
+                await callback.answer("Folder not found", show_alert=True)
     
     elif data.startswith("delfolder:"):
         folder_id = int(data.split(":")[1])

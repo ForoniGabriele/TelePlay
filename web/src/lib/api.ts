@@ -23,6 +23,8 @@ export interface Folder {
     created_at: string;
     updated_at: string;
     file_count: number;
+    cover_file_id?: string | null;
+    cover_url?: string | null;
     children?: Folder[];
 }
 
@@ -473,6 +475,52 @@ export const useDeleteFolders = () => {
              queryClient.invalidateQueries({ queryKey: ['folderTree'] });
              queryClient.invalidateQueries({ queryKey: ['files'] });
              queryClient.invalidateQueries({ queryKey: ['storage'] });
+        },
+    });
+};
+
+export const useUploadFolderCover = () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: async ({ folderId, file }: { folderId: number; file: File }) => {
+            const formData = new FormData();
+            formData.append('file', file);
+            const { data } = await api.post<Folder>(`/folders/${folderId}/cover`, formData, {
+                headers: { 'Content-Type': 'multipart/form-data' },
+            });
+            return data;
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['folders'] });
+            queryClient.invalidateQueries({ queryKey: ['folderTree'] });
+        },
+    });
+};
+
+export const useSetFolderCoverFromFile = () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: async ({ folderId, fileId }: { folderId: number; fileId: number }) => {
+            const { data } = await api.post<Folder>(`/folders/${folderId}/cover/from-file/${fileId}`);
+            return data;
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['folders'] });
+            queryClient.invalidateQueries({ queryKey: ['folderTree'] });
+        },
+    });
+};
+
+export const useDeleteFolderCover = () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: async (folderId: number) => {
+            const { data } = await api.delete<Folder>(`/folders/${folderId}/cover`);
+            return data;
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['folders'] });
+            queryClient.invalidateQueries({ queryKey: ['folderTree'] });
         },
     });
 };

@@ -55,7 +55,9 @@ async def tv_browse(
                 "id": f.id,
                 "name": f.name,
                 "parent_id": f.parent_id,
-                "file_count": None  # Can be computed if needed
+                "file_count": None,
+                "cover_file_id": f.cover_file_id,
+                "cover_url": f"/api/folders/{f.id}/cover" if f.cover_file_id else None,
             }
             for f in folders
         ]
@@ -125,7 +127,9 @@ async def tv_search(
             {
                 "id": f.id,
                 "name": f.name,
-                "parent_id": f.parent_id
+                "parent_id": f.parent_id,
+                "cover_file_id": f.cover_file_id,
+                "cover_url": f"/api/folders/{f.id}/cover" if f.cover_file_id else None,
             }
             for f in folders
         ]
@@ -184,6 +188,8 @@ async def tv_folder_detail(
                 "name": parent.name,
                 "parent_id": parent.parent_id,
                 "user_id": parent.user_id,
+                "cover_file_id": parent.cover_file_id,
+                "cover_url": f"/api/folders/{parent.id}/cover" if parent.cover_file_id else None,
                 "created_at": parent.created_at.isoformat() if parent.created_at else None,
                 "updated_at": parent.updated_at.isoformat() if parent.updated_at else None,
             })
@@ -197,6 +203,8 @@ async def tv_folder_detail(
             "name": folder.name,
             "parent_id": folder.parent_id,
             "user_id": folder.user_id,
+            "cover_file_id": folder.cover_file_id,
+            "cover_url": f"/api/folders/{folder.id}/cover" if folder.cover_file_id else None,
             "created_at": folder.created_at.isoformat() if folder.created_at else None,
             "updated_at": folder.updated_at.isoformat() if folder.updated_at else None,
         },
@@ -206,6 +214,8 @@ async def tv_folder_detail(
                 "name": sf.name,
                 "parent_id": sf.parent_id,
                 "user_id": sf.user_id,
+                "cover_file_id": sf.cover_file_id,
+                "cover_url": f"/api/folders/{sf.id}/cover" if sf.cover_file_id else None,
                 "created_at": sf.created_at.isoformat() if sf.created_at else None,
                 "updated_at": sf.updated_at.isoformat() if sf.updated_at else None,
             }

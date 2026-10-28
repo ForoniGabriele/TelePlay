@@ -20,16 +20,19 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
+import coil.compose.AsyncImage
 import com.telegramtv.data.model.Folder
 import com.telegramtv.ui.theme.*
 
 /**
- * TV-optimized folder card with gradient background and animated icon.
+ * TV-optimized folder card with gradient background and animated icon or cover image.
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
@@ -77,52 +80,99 @@ fun FolderCard(
         ),
         shape = CardDefaults.shape(shape = RoundedCornerShape(12.dp))
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    if (isFocused) Brush.linearGradient(
-                        listOf(
-                            TVPrimary.copy(alpha = 0.08f),
-                            TVSecondary.copy(alpha = 0.04f)
-                        )
-                    ) else Brush.linearGradient(
-                        listOf(
-                            TVCardBackground,
-                            TVCardBackground
-                        )
-                    )
-                )
-                .padding(16.dp)
-        ) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    imageVector = if (isFocused) Icons.Default.FolderOpen else Icons.Default.Folder,
+        if (!folder.coverUrl.isNullOrEmpty()) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                AsyncImage(
+                    model = folder.coverUrl,
                     contentDescription = folder.name,
-                    modifier = Modifier.size(48.dp),
-                    tint = if (isFocused) TVSecondary else TVTextSecondary
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Text(
-                    text = folder.name,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TVTextPrimary,
-                    fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1
+                // Gradient overlay at bottom
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(60.dp)
+                        .align(Alignment.BottomCenter)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))
+                            )
+                        )
                 )
 
-                folder.fileCount?.let { count ->
+                // Info overlay
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.BottomStart)
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
                     Text(
-                        text = "$count files",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (isFocused) TVSecondary else TVTextSecondary
+                        text = folder.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White,
+                        fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium,
+                        maxLines = 1
                     )
+                    folder.fileCount?.let { count ->
+                        Text(
+                            text = "$count files",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TVSecondary
+                        )
+                    }
+                }
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        if (isFocused) Brush.linearGradient(
+                            listOf(
+                                TVPrimary.copy(alpha = 0.08f),
+                                TVSecondary.copy(alpha = 0.04f)
+                            )
+                        ) else Brush.linearGradient(
+                            listOf(
+                                TVCardBackground,
+                                TVCardBackground
+                            )
+                        )
+                    )
+                    .padding(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = if (isFocused) Icons.Default.FolderOpen else Icons.Default.Folder,
+                        contentDescription = folder.name,
+                        modifier = Modifier.size(48.dp),
+                        tint = if (isFocused) TVSecondary else TVTextSecondary
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = folder.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TVTextPrimary,
+                        fontWeight = if (isFocused) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1
+                    )
+
+                    folder.fileCount?.let { count ->
+                        Text(
+                            text = "$count files",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isFocused) TVSecondary else TVTextSecondary
+                        )
+                    }
                 }
             }
         }
@@ -171,12 +221,23 @@ fun FolderListItem(
                 .padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = if (isFocused) Icons.Default.FolderOpen else Icons.Default.Folder,
-                contentDescription = folder.name,
-                modifier = Modifier.size(32.dp),
-                tint = if (isFocused) TVSecondary else TVTextSecondary
-            )
+            if (!folder.coverUrl.isNullOrEmpty()) {
+                AsyncImage(
+                    model = folder.coverUrl,
+                    contentDescription = folder.name,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(TVCardBackground, RoundedCornerShape(6.dp)),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Icon(
+                    imageVector = if (isFocused) Icons.Default.FolderOpen else Icons.Default.Folder,
+                    contentDescription = folder.name,
+                    modifier = Modifier.size(32.dp),
+                    tint = if (isFocused) TVSecondary else TVTextSecondary
+                )
+            }
 
             Spacer(modifier = Modifier.width(16.dp))
 

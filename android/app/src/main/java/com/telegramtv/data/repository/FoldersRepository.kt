@@ -114,4 +114,11 @@ class FoldersRepository @Inject constructor(
             Result.failure(e)
         }
     }
+
+    /**
+     * Build cover URL for a folder.
+     */
+    fun getCoverUrl(folderId: Int, serverUrl: String): String {
+        return "${serverUrl}/api/folders/$folderId/cover"
+    }
 }

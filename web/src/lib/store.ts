@@ -37,6 +37,9 @@ interface AppState {
     renameFolder: Folder | null;
     setRenameFolder: (folder: Folder | null) => void;
 
+    coverFolder: Folder | null;
+    setCoverFolder: (folder: Folder | null) => void;
+
     moveItems: { files: TelegramFile[], folders: Folder[] } | null;
     setMoveItems: (items: { files: TelegramFile[], folders: Folder[] } | null) => void;
     setMoveFiles: (files: TelegramFile[]) => void;
@@ -146,6 +149,9 @@ export const useAppStore = create<AppState>((set) => ({
 
     renameFolder: null,
     setRenameFolder: (folder) => set({ renameFolder: folder }),
+
+    coverFolder: null,
+    setCoverFolder: (folder) => set({ coverFolder: folder }),
 
     moveItems: null,
     setMoveItems: (items) => set({ moveItems: items }),

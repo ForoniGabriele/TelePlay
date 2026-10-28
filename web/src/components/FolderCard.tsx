@@ -1,5 +1,5 @@
 /**
- * FolderCard component - displays a folder in grid or list view with drag-drop support
+ * FolderCard component - displays a folder in grid or list view with drag-drop support and cover image support
  */
 import { useState } from 'react';
 import { Folder as FolderIcon, MoreVertical, ChevronRight } from 'lucide-react';
@@ -21,6 +21,12 @@ export default function FolderCard({ folder, viewMode, selected, onSelect, onOpe
 
     // Check if this folder's context menu is active
     const showMenu = activeContextMenu?.type === 'folder' && activeContextMenu?.item.id === folder.id;
+
+    // Authorized cover URL
+    const token = localStorage.getItem('access_token');
+    const authorizedCoverUrl = folder.cover_url
+        ? `${folder.cover_url}${folder.cover_url.includes('?') ? '&' : '?'}token=${token}`
+        : null;
 
     const handleContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
@@ -91,17 +97,25 @@ export default function FolderCard({ folder, viewMode, selected, onSelect, onOpe
                 data-folder-id={folder.id}
             >
                 <div 
-                    className={`w-12 h-12 rounded-lg flex items-center justify-center shrink-0 border transition-colors relative
+                    className={`w-12 h-12 rounded-lg flex items-center justify-center shrink-0 border transition-colors relative overflow-hidden
                         ${selected 
                             ? 'bg-primary-500/20 border-primary-500/40' 
                             : 'bg-primary-500/10 border-primary-500/20 group-hover:bg-primary-500/20'}`}
                 >
-                    <FolderIcon className={`w-6 h-6 transition-colors ${selected ? 'text-primary-300' : 'text-primary-400 group-hover:text-primary-300'}`} />
+                    {authorizedCoverUrl ? (
+                        <img
+                            src={authorizedCoverUrl}
+                            alt={folder.name}
+                            className="w-full h-full object-cover"
+                        />
+                    ) : (
+                        <FolderIcon className={`w-6 h-6 transition-colors ${selected ? 'text-primary-300' : 'text-primary-400 group-hover:text-primary-300'}`} />
+                    )}
                     
                     {/* Selection indicator for list view */}
                     <div 
                         onClick={handleSelectClick}
-                        className={`absolute -top-1 -left-1 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all
+                        className={`absolute -top-1 -left-1 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all z-10
                             ${selected 
                                 ? 'bg-primary-500 border-dark-950 scale-110 shadow-lg shadow-primary-500/20' 
                                 : 'bg-dark-800 border-white/10 opacity-0 group-hover:opacity-100 hover:border-primary-500/50'}`}
@@ -141,7 +155,7 @@ export default function FolderCard({ folder, viewMode, selected, onSelect, onOpe
     // Grid view
     return (
         <div
-            className={`p-4 rounded-xl cursor-pointer transition-all duration-300 group relative animate-scale-in select-none
+            className={`p-3 sm:p-4 rounded-xl cursor-pointer transition-all duration-300 group relative animate-scale-in select-none
                 glass-card hover:bg-dark-800/60 hover:shadow-xl hover:shadow-black/20 hover:-translate-y-1
                 ${dropStyles} ${selectedStyles}`}
             onClick={handleClick}
@@ -151,49 +165,110 @@ export default function FolderCard({ folder, viewMode, selected, onSelect, onOpe
             onDrop={handleDrop}
             data-folder-id={folder.id}
         >
-            <div className="flex items-start justify-between mb-3">
-                <div 
-                    className={`w-10 h-10 rounded-lg flex items-center justify-center border group-hover:scale-110 transition-all duration-300 relative
-                        ${selected 
-                            ? 'bg-gradient-to-br from-primary-500/20 to-primary-500/10 border-primary-500/40' 
-                            : 'bg-gradient-to-br from-primary-500/10 to-primary-500/5 border-primary-500/20 group-hover:border-primary-500/30'}`}
-                >
-                    <FolderIcon className={`w-5 h-5 transition-colors ${selected ? 'text-primary-300' : 'text-primary-400'}`} />
-                    
-                    {/* Selection indicator for grid view */}
-                    <div 
-                        onClick={handleSelectClick}
-                        className={`absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all z-10
-                            ${selected 
-                                ? 'bg-primary-500 border-dark-900 scale-110 shadow-lg shadow-primary-500/20' 
-                                : 'bg-dark-800 border-white/10 opacity-0 group-hover:opacity-100 hover:border-primary-500/50'}`}
-                    >
-                         <div className={`w-1.5 h-1.5 rounded-full bg-white transition-transform ${selected ? 'scale-100' : 'scale-0'}`} />
-                    </div>
-                </div>
-                
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        if (showMenu) {
-                            setActiveContextMenu(null);
-                        } else {
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            setActiveContextMenu({ type: 'folder', item: folder, x: rect.right, y: rect.bottom });
-                        }
-                    }}
-                    className={`p-1.5 rounded-lg transition-colors ${showMenu ? 'bg-white/10 text-white' : 'hover:bg-white/[0.08] text-dark-400 opacity-0 group-hover:opacity-100'}`}
-                >
-                    <MoreVertical className="w-4 h-4" />
-                </button>
-            </div>
+            {authorizedCoverUrl ? (
+                <>
+                    {/* Cover Image Container */}
+                    <div className={`aspect-video rounded-lg mb-3 overflow-hidden relative border ${selected ? 'border-primary-500/30' : 'border-white/[0.05]'} bg-dark-900/50`}>
+                        <img
+                            src={authorizedCoverUrl}
+                            alt={folder.name}
+                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                        
+                        {/* Folder badge overlay */}
+                        <div className="absolute bottom-1.5 left-1.5 bg-black/60 backdrop-blur-md px-1.5 py-0.5 rounded text-[10px] font-medium text-white flex items-center gap-1 shadow-sm">
+                            <FolderIcon className="w-3 h-3 text-primary-400" />
+                            <span>Folder</span>
+                        </div>
 
-            <p className={`font-medium text-sm truncate transition-colors ${selected ? 'text-primary-300' : 'text-white group-hover:text-primary-300'}`} title={folder.name}>
-                {folder.name}
-            </p>
-            <p className="text-xs text-dark-500 mt-1">
-                {folder.file_count} {folder.file_count === 1 ? 'file' : 'files'}
-            </p>
+                        {/* Selection indicator */}
+                        <div 
+                            onClick={handleSelectClick}
+                            className={`absolute top-1.5 left-1.5 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all z-10
+                                ${selected 
+                                    ? 'bg-primary-500 border-dark-900 scale-110 shadow-lg shadow-primary-500/20' 
+                                    : 'bg-dark-800 border-white/10 opacity-0 group-hover:opacity-100 hover:border-primary-500/50'}`}
+                        >
+                            <div className={`w-1.5 h-1.5 rounded-full bg-white transition-transform ${selected ? 'scale-100' : 'scale-0'}`} />
+                        </div>
+                    </div>
+
+                    <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                            <p className={`font-medium text-sm truncate transition-colors ${selected ? 'text-primary-300' : 'text-white group-hover:text-primary-300'}`} title={folder.name}>
+                                {folder.name}
+                            </p>
+                            <p className="text-xs text-dark-500 mt-1">
+                                {folder.file_count} {folder.file_count === 1 ? 'file' : 'files'}
+                            </p>
+                        </div>
+                        <div className={`${showMenu ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (showMenu) {
+                                        setActiveContextMenu(null);
+                                    } else {
+                                        const rect = e.currentTarget.getBoundingClientRect();
+                                        setActiveContextMenu({ type: 'folder', item: folder, x: rect.right, y: rect.bottom });
+                                    }
+                                }}
+                                className={`p-1.5 rounded-lg transition-colors ${showMenu ? 'bg-white/10 text-white' : 'hover:bg-white/[0.08] text-dark-400'}`}
+                            >
+                                <MoreVertical className="w-4 h-4" />
+                            </button>
+                        </div>
+                    </div>
+                </>
+            ) : (
+                <>
+                    {/* Default Icon Header */}
+                    <div className="flex items-start justify-between mb-3">
+                        <div 
+                            className={`w-10 h-10 rounded-lg flex items-center justify-center border group-hover:scale-110 transition-all duration-300 relative
+                                ${selected 
+                                    ? 'bg-gradient-to-br from-primary-500/20 to-primary-500/10 border-primary-500/40' 
+                                    : 'bg-gradient-to-br from-primary-500/10 to-primary-500/5 border-primary-500/20 group-hover:border-primary-500/30'}`}
+                        >
+                            <FolderIcon className={`w-5 h-5 transition-colors ${selected ? 'text-primary-300' : 'text-primary-400'}`} />
+                            
+                            {/* Selection indicator for grid view */}
+                            <div 
+                                onClick={handleSelectClick}
+                                className={`absolute -top-1.5 -left-1.5 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all z-10
+                                    ${selected 
+                                        ? 'bg-primary-500 border-dark-900 scale-110 shadow-lg shadow-primary-500/20' 
+                                        : 'bg-dark-800 border-white/10 opacity-0 group-hover:opacity-100 hover:border-primary-500/50'}`}
+                            >
+                                <div className={`w-1.5 h-1.5 rounded-full bg-white transition-transform ${selected ? 'scale-100' : 'scale-0'}`} />
+                            </div>
+                        </div>
+                        
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (showMenu) {
+                                    setActiveContextMenu(null);
+                                } else {
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    setActiveContextMenu({ type: 'folder', item: folder, x: rect.right, y: rect.bottom });
+                                }
+                            }}
+                            className={`p-1.5 rounded-lg transition-colors ${showMenu ? 'bg-white/10 text-white' : 'hover:bg-white/[0.08] text-dark-400 opacity-0 group-hover:opacity-100'}`}
+                        >
+                            <MoreVertical className="w-4 h-4" />
+                        </button>
+                    </div>
+
+                    <p className={`font-medium text-sm truncate transition-colors ${selected ? 'text-primary-300' : 'text-white group-hover:text-primary-300'}`} title={folder.name}>
+                        {folder.name}
+                    </p>
+                    <p className="text-xs text-dark-500 mt-1">
+                        {folder.file_count} {folder.file_count === 1 ? 'file' : 'files'}
+                    </p>
+                </>
+            )}
         </div>
     );
 }

@@ -2,7 +2,7 @@
  * Main FileBrowser component - the core of the web interface
  */
 import { useEffect, useCallback, useRef, useState, useMemo } from 'react';
-import { FolderPlus, Grid, List, Search, ChevronRight, Home, RefreshCw, Clipboard, ArrowUp, Film, Music, Image as ImageIcon, FileText, Menu } from 'lucide-react';
+import { FolderPlus, Grid, List, Search, ChevronRight, Home, RefreshCw, Clipboard, ArrowUp, Film, Music, Image as ImageIcon, FileText, Menu, Upload } from 'lucide-react';
 import { useFiles, useFolders, useUpdateFile, useUpdateFolder, useDeleteFolder, useDeleteFiles, useMoveFiles, TelegramFile, Folder, useRecentFiles, useContinueWatching, useDeleteFolders, useMoveFolders } from '../lib/api';
 import { useAppStore } from '../lib/store';
 import FileCard from './FileCard';
@@ -14,6 +14,9 @@ import RenameModal from './RenameModal';
 import FolderCoverModal from './FolderCoverModal';
 import Sidebar from './Sidebar';
 import Toasts from './Toasts';
+import UploadPanel from './UploadPanel';
+import { useUploader } from '../lib/useUploader';
+import { useQueryClient } from '@tanstack/react-query';
 
 export default function FileBrowser() {
     const {
@@ -64,11 +67,42 @@ export default function FileBrowser() {
     // Sorting state
     const [sortBy, setSortBy] = useState<'default' | 'name_asc' | 'name_desc'>('name_asc');
 
+    // ---- Upload from the web interface ----
+    const queryClient = useQueryClient();
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const dragDepth = useRef(0);
+    const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+
+    const handleUploaded = useCallback((uploaded: TelegramFile) => {
+        // The list accumulates pages, so add the new file by hand when it belongs to the folder on screen
+        if (activeSection === 'files' && (uploaded.folder_id ?? null) === (currentFolderId ?? null)) {
+            setAllFiles(prev => (prev.some(f => f.id === uploaded.id) ? prev : [uploaded, ...prev]));
+        }
+        queryClient.invalidateQueries({ queryKey: ['files'] });
+        queryClient.invalidateQueries({ queryKey: ['folders'] });
+        queryClient.invalidateQueries({ queryKey: ['folderTree'] });
+        queryClient.invalidateQueries({ queryKey: ['storage'] });
+    }, [activeSection, currentFolderId, queryClient]);
+
+    const uploader = useUploader(
+        handleUploaded,
+        (name, message) => addToast(`Upload failed: ${name} (${message})`, 'error')
+    );
+
+    const handleFilesChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const chosen = Array.from(e.target.files || []);
+        e.target.value = ''; // lets the same file be chosen again
+        uploader.addFiles(chosen, currentFolderId ?? null);
+    };
+
+    // Only react to files dragged from the computer, not to files dragged inside the app
+    const dragHasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer.types || []).includes('Files');
+
     // Data Fetching
     const { data: filesList, isLoading: filesLoading, refetch: refetchFiles } = useFiles(currentFolderId, fileTypeFilter || undefined, searchQuery || undefined, page);
     const { data: recentFiles, isLoading: recentLoading, refetch: refetchRecent } = useRecentFiles(50);
     const { data: cwFiles, isLoading: cwLoading, refetch: refetchCW } = useContinueWatching(50);
-    
+
 
     // For files section, accumulate files from all pages
     useEffect(() => {
@@ -128,7 +162,7 @@ export default function FileBrowser() {
 
     // From here on, everything uses the sorted list
     displayFiles = sortedFiles;
-    
+
     // Mutations
     const deleteFilesMutation = useDeleteFiles();
     const deleteFolderMutation = useDeleteFolder();
@@ -198,7 +232,7 @@ export default function FileBrowser() {
     const handleDeleteConfirm = async () => {
         if (!deleteConfirm) return;
         const { type, items } = deleteConfirm;
-        
+
         try {
             if (type === 'file') {
                 const ids = items.map(i => i.id);
@@ -211,15 +245,15 @@ export default function FileBrowser() {
                     await deleteFolderMutation.mutateAsync({ id: ids[0] });
                 }
             } else if (type === 'multiple') {
-                 // Split into files and folders
-                 const fileIds = items.filter(i => 'file_name' in i).map(i => i.id);
-                 const folderIds = items.filter(i => 'name' in i && !('file_name' in i)).map(i => i.id);
-                 
-                 const promises = [];
-                 if (fileIds.length > 0) promises.push(deleteFilesMutation.mutateAsync(fileIds));
-                 if (folderIds.length > 0) promises.push(deleteFoldersMutation.mutateAsync(folderIds));
-                 
-                 await Promise.all(promises);
+                // Split into files and folders
+                const fileIds = items.filter(i => 'file_name' in i).map(i => i.id);
+                const folderIds = items.filter(i => 'name' in i && !('file_name' in i)).map(i => i.id);
+
+                const promises = [];
+                if (fileIds.length > 0) promises.push(deleteFilesMutation.mutateAsync(fileIds));
+                if (folderIds.length > 0) promises.push(deleteFoldersMutation.mutateAsync(folderIds));
+
+                await Promise.all(promises);
             }
             setDeleteConfirm(null);
             clearSelection();
@@ -264,7 +298,7 @@ export default function FileBrowser() {
     const handleMouseDown = (e: React.MouseEvent) => {
         if (e.button !== 0) return; // Only left click
         // If clicking on a card or button, ignore
-        if ((e.target as HTMLElement).closest('.file-card') || 
+        if ((e.target as HTMLElement).closest('.file-card') ||
             (e.target as HTMLElement).closest('button') ||
             (e.target as HTMLElement).closest('.sidebar')) return;
 
@@ -277,7 +311,7 @@ export default function FileBrowser() {
             selectionStart.current = { x: startX, y: startY };
             setSelectionBox({ x1: startX, y1: startY, x2: startX, y2: startY, active: true });
         }
-        
+
         if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
             clearSelection();
         }
@@ -285,7 +319,7 @@ export default function FileBrowser() {
 
     const handleMouseMove = (e: React.MouseEvent) => {
         if (!isSelecting || !containerRef.current) return;
-        
+
         const rect = containerRef.current.getBoundingClientRect();
         const currentX = e.clientX - rect.left + containerRef.current.scrollLeft;
         const currentY = e.clientY - rect.top + containerRef.current.scrollTop;
@@ -308,7 +342,7 @@ export default function FileBrowser() {
 
         const fileIdsToSelect: number[] = [];
         const folderIdsToSelect: number[] = [];
-        
+
         // Check files
         const fileElements = containerRef.current.querySelectorAll('[data-file-id]');
         fileElements.forEach((el) => {
@@ -359,7 +393,7 @@ export default function FileBrowser() {
             // For now, do nothing or show a toast
             // Maybe implement lightbox for images later
             if (file.file_type === 'image') {
-                 // Future: Lightbox
+                // Future: Lightbox
             }
             // Prevent opening empty player
         }
@@ -455,10 +489,10 @@ export default function FileBrowser() {
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [
-        previewFile, showNewFolder, moveItems, deleteConfirm, 
-        selectedFileIds, displayFiles, breadcrumbs, clipboard, 
+        previewFile, showNewFolder, moveItems, deleteConfirm,
+        selectedFileIds, displayFiles, breadcrumbs, clipboard,
         currentFolderId, handlePaste, handleRefresh,
-        setPreviewFile, setShowNewFolder, setMoveItems, setDeleteConfirm, 
+        setPreviewFile, setShowNewFolder, setMoveItems, setDeleteConfirm,
         clearSelection, selectAll, setRenameFile, navigateToBreadcrumb, setClipboard, folders
     ]);
 
@@ -497,14 +531,14 @@ export default function FileBrowser() {
     return (
         <div className="flex h-screen bg-dark-950 text-white selection:bg-primary-500/30 overflow-hidden">
             <Sidebar isOpen={isSidebarOpen} onClose={() => setSidebarOpen(false)} />
-            
+
             <main className={`flex-1 flex flex-col min-w-0 relative bg-gradient-to-br from-dark-950 to-dark-900 transition-[margin] duration-300 ease-in-out ${isSidebarOpen ? 'md:ml-64' : 'ml-0'}`}>
                 {/* Header */}
                 <header className="h-16 border-b border-white/[0.06] flex items-center justify-between px-4 sm:px-6 bg-dark-900/50 backdrop-blur-sm z-30 sticky top-0">
                     {/* Left: Hamburger & Search & Breadcrumbs */}
                     <div className="flex items-center gap-3 md:gap-6 flex-1 min-w-0">
                         {/* Hamburger */}
-                        <button 
+                        <button
                             onClick={() => setSidebarOpen(!isSidebarOpen)}
                             className="p-2 -ml-2 text-dark-400 hover:text-white"
                         >
@@ -522,7 +556,7 @@ export default function FileBrowser() {
                                 className="w-full bg-dark-800/50 border border-white/[0.06] rounded-lg pl-9 pr-3 py-1.5 text-sm text-white focus:outline-none focus:border-primary-500/50 focus:bg-dark-800 transition-all"
                             />
                         </div>
-                        
+
                         {/* Vertical Div */}
                         <div className="hidden sm:block w-px h-6 bg-white/[0.1]"></div>
 
@@ -531,9 +565,9 @@ export default function FileBrowser() {
                             {breadcrumbs.map((crumb, index) => (
                                 <div key={crumb.id || 'root'} className="flex items-center min-w-0">
                                     {index > 0 && <ChevronRight className="w-4 h-4 text-dark-600 mx-1 shrink-0" />}
-                                    <button 
+                                    <button
                                         onClick={() => navigateToBreadcrumb(index)}
-                                        className={`px-2 py-1 rounded-md text-sm truncate max-w-[150px] transition-colors ${index === breadcrumbs.length - 1 
+                                        className={`px-2 py-1 rounded-md text-sm truncate max-w-[150px] transition-colors ${index === breadcrumbs.length - 1
                                             ? 'text-white font-medium bg-white/[0.05]'
                                             : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
                                             }`}
@@ -548,50 +582,45 @@ export default function FileBrowser() {
 
                     {/* Right: Actions */}
                     <div className="flex items-center gap-2 sm:gap-3">
-                         {/* Filter buttons with Icons */}
+                        {/* Filter buttons with Icons */}
                         <div className="hidden md:flex items-center bg-dark-800/50 rounded-lg p-0.5 border border-white/[0.06] mr-2">
-                             <button
+                            <button
                                 onClick={() => setFileTypeFilter(null)}
                                 title="All Files"
-                                className={`p-1.5 rounded-md transition-all ${
-                                    !fileTypeFilter ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
-                                }`}
+                                className={`p-1.5 rounded-md transition-all ${!fileTypeFilter ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
+                                    }`}
                             >
                                 <Grid className="w-4 h-4" />
                             </button>
                             <button
                                 onClick={() => setFileTypeFilter('video')}
                                 title="Videos"
-                                className={`p-1.5 rounded-md transition-all ${
-                                    fileTypeFilter === 'video' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
-                                }`}
+                                className={`p-1.5 rounded-md transition-all ${fileTypeFilter === 'video' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
+                                    }`}
                             >
                                 <Film className="w-4 h-4" />
                             </button>
                             <button
                                 onClick={() => setFileTypeFilter('audio')}
                                 title="Audio"
-                                className={`p-1.5 rounded-md transition-all ${
-                                    fileTypeFilter === 'audio' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
-                                }`}
+                                className={`p-1.5 rounded-md transition-all ${fileTypeFilter === 'audio' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
+                                    }`}
                             >
                                 <Music className="w-4 h-4" />
                             </button>
                             <button
                                 onClick={() => setFileTypeFilter('image')}
                                 title="Images"
-                                className={`p-1.5 rounded-md transition-all ${
-                                    fileTypeFilter === 'image' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
-                                }`}
+                                className={`p-1.5 rounded-md transition-all ${fileTypeFilter === 'image' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
+                                    }`}
                             >
                                 <ImageIcon className="w-4 h-4" />
                             </button>
                             <button
                                 onClick={() => setFileTypeFilter('document')}
                                 title="Documents"
-                                className={`p-1.5 rounded-md transition-all ${
-                                    fileTypeFilter === 'document' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
-                                }`}
+                                className={`p-1.5 rounded-md transition-all ${fileTypeFilter === 'document' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'
+                                    }`}
                             >
                                 <FileText className="w-4 h-4" />
                             </button>
@@ -608,30 +637,30 @@ export default function FileBrowser() {
                             <option value="name_asc" className="bg-dark-900">Name A-Z</option>
                             <option value="name_desc" className="bg-dark-900">Name Z-A</option>
                         </select>
- 
-                         <div className="flex items-center gap-1 bg-dark-800/50 rounded-lg p-0.5 border border-white/[0.06]">
-                             <button
-                                 onClick={handleRefresh}
-                                 disabled={isLoading}
-                                 className={`p-1.5 rounded-md text-dark-400 hover:text-white hover:bg-white/[0.05] transition-all active:scale-95 ${isLoading ? 'animate-spin' : ''}`}
-                                 title="Refresh"
-                             >
-                                 <RefreshCw className="w-4 h-4" />
-                             </button>
-                             <div className="w-px h-3 bg-white/[0.1] mx-1"></div>
-                             <button
-                                 onClick={() => setViewMode('grid')}
-                                 className={`p-1.5 rounded-md transition-all ${viewMode === 'grid' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'}`}
-                             >
-                                 <Grid className="w-4 h-4" />
-                             </button>
-                             <button
-                                 onClick={() => setViewMode('list')}
-                                 className={`p-1.5 rounded-md transition-all ${viewMode === 'list' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'}`}
-                             >
-                                 <List className="w-4 h-4" />
-                             </button>
-                         </div>
+
+                        <div className="flex items-center gap-1 bg-dark-800/50 rounded-lg p-0.5 border border-white/[0.06]">
+                            <button
+                                onClick={handleRefresh}
+                                disabled={isLoading}
+                                className={`p-1.5 rounded-md text-dark-400 hover:text-white hover:bg-white/[0.05] transition-all active:scale-95 ${isLoading ? 'animate-spin' : ''}`}
+                                title="Refresh"
+                            >
+                                <RefreshCw className="w-4 h-4" />
+                            </button>
+                            <div className="w-px h-3 bg-white/[0.1] mx-1"></div>
+                            <button
+                                onClick={() => setViewMode('grid')}
+                                className={`p-1.5 rounded-md transition-all ${viewMode === 'grid' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'}`}
+                            >
+                                <Grid className="w-4 h-4" />
+                            </button>
+                            <button
+                                onClick={() => setViewMode('list')}
+                                className={`p-1.5 rounded-md transition-all ${viewMode === 'list' ? 'bg-primary-600 text-white shadow-sm' : 'text-dark-400 hover:text-white hover:bg-white/[0.05]'}`}
+                            >
+                                <List className="w-4 h-4" />
+                            </button>
+                        </div>
 
 
                         {clipboard && (clipboard.files.length > 0 || clipboard.folders.length > 0) && (
@@ -642,6 +671,26 @@ export default function FileBrowser() {
                                 <Clipboard className="w-3.5 h-3.5" />
                                 Paste ({clipboard.files.length + clipboard.folders.length})
                             </button>
+                        )}
+
+                        {activeSection === 'files' && (
+                            <>
+                                <button
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="ml-2 btn-secondary py-1.5 px-3 text-sm flex items-center gap-2"
+                                    title="Upload files"
+                                >
+                                    <Upload className="w-4 h-4" />
+                                    <span className="hidden sm:inline">Upload</span>
+                                </button>
+                                <input
+                                    ref={fileInputRef}
+                                    type="file"
+                                    multiple
+                                    className="hidden"
+                                    onChange={handleFilesChosen}
+                                />
+                            </>
                         )}
 
                         {activeSection === 'files' && (
@@ -657,7 +706,7 @@ export default function FileBrowser() {
                 </header>
 
                 {/* Content Area */}
-                <div 
+                <div
                     ref={containerRef}
                     className="flex-1 overflow-auto p-6 relative outline-none"
                     onMouseDown={handleMouseDown}
@@ -667,7 +716,31 @@ export default function FileBrowser() {
                     tabIndex={0}
                     // Prevent default drag behaviors on container
                     onDragOver={(e) => e.preventDefault()}
+                    onDragEnter={(e) => {
+                        if (!dragHasFiles(e)) return;
+                        dragDepth.current += 1;
+                        setIsDraggingFiles(true);
+                    }}
+                    onDragLeave={(e) => {
+                        if (!dragHasFiles(e)) return;
+                        dragDepth.current = Math.max(0, dragDepth.current - 1);
+                        if (dragDepth.current === 0) setIsDraggingFiles(false);
+                    }}
+                    onDrop={(e) => {
+                        if (!dragHasFiles(e)) return;
+                        e.preventDefault();
+                        dragDepth.current = 0;
+                        setIsDraggingFiles(false);
+                        if (activeSection === 'files') {
+                            uploader.addFiles(Array.from(e.dataTransfer.files), currentFolderId ?? null);
+                        }
+                    }}
                 >
+                    {isDraggingFiles && activeSection === 'files' && (
+                        <div className="pointer-events-none absolute inset-2 z-40 flex items-center justify-center rounded-xl border-2 border-dashed border-primary-500/60 bg-primary-500/10">
+                            <p className="text-primary-300 font-medium">Drop files to upload here</p>
+                        </div>
+                    )}
                     {isLoading && !displayFiles ? (
                         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 animate-fade-in">
                             {[...Array(10)].map((_, i) => (
@@ -676,8 +749,8 @@ export default function FileBrowser() {
                         </div>
                     ) : (
                         <>
-                             {/* Unified View */}
-                             {(showFolders && folders?.length ? folders.length : 0) + (displayFiles?.length || 0) > 0 ? (
+                            {/* Unified View */}
+                            {(showFolders && folders?.length ? folders.length : 0) + (displayFiles?.length || 0) > 0 ? (
                                 <div className={viewMode === 'grid'
                                     ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4 pb-20'
                                     : 'flex flex-col gap-2 pb-20'
@@ -694,7 +767,7 @@ export default function FileBrowser() {
                                             onFileDrop={handleFileDrop}
                                         />
                                     ))}
-                                    
+
                                     {/* Files */}
                                     {displayFiles?.map((file) => (
                                         <FileCard
@@ -721,7 +794,7 @@ export default function FileBrowser() {
 
                             {/* Selection Rectangle Overlay */}
                             {selectionBox?.active && (
-                                <div 
+                                <div
                                     className="absolute bg-primary-500/10 border border-primary-500/30 pointer-events-none rounded sm z-50 backdrop-blur-[1px]"
                                     style={{
                                         left: Math.min(selectionBox.x1, selectionBox.x2),
@@ -749,8 +822,13 @@ export default function FileBrowser() {
                     )}
                 </div>
             </main>
-            
+
             <Toasts />
+            <UploadPanel
+                items={uploader.items}
+                onCancel={uploader.cancel}
+                onClearFinished={uploader.clearFinished}
+            />
 
             {/* Modals */}
             {showNewFolder && (
@@ -760,18 +838,18 @@ export default function FileBrowser() {
                 />
             )}
 
-                {moveItems && (
-                    <MoveFileModal
-                        items={moveItems}
-                        onClose={() => setMoveItems(null)}
-                    />
-                )}
+            {moveItems && (
+                <MoveFileModal
+                    items={moveItems}
+                    onClose={() => setMoveItems(null)}
+                />
+            )}
 
             {deleteConfirm && (
                 <DeleteConfirmModal
                     type={deleteConfirm.type}
                     count={deleteConfirm.items.length}
-                    name={deleteConfirm.items.length === 1 
+                    name={deleteConfirm.items.length === 1
                         ? (deleteConfirm.type === 'file' ? (deleteConfirm.items[0] as TelegramFile).file_name : (deleteConfirm.items[0] as Folder).name)
                         : undefined
                     }

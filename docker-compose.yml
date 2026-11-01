@@ -45,7 +45,7 @@ services:
         condition: service_healthy
     environment:
       # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-telegram_tv}
+      DATABASE_URL: ${DATABASE_URL}
 
       # Redis (Optional - Currently unused)
       # REDIS_URL: redis://redis:6379

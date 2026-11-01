@@ -2,6 +2,7 @@
  * Main FileBrowser component - the core of the web interface
  */
 import { useEffect, useCallback, useRef, useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { FolderPlus, Grid, List, Search, ChevronRight, Home, RefreshCw, Clipboard, ArrowUp, Film, Music, Image as ImageIcon, FileText, Menu, Upload } from 'lucide-react';
 import { useFiles, useFolders, useUpdateFile, useUpdateFolder, useDeleteFolder, useDeleteFiles, useMoveFiles, TelegramFile, Folder, useRecentFiles, useContinueWatching, useDeleteFolders, useMoveFolders } from '../lib/api';
 import { useAppStore } from '../lib/store';
@@ -58,6 +59,46 @@ export default function FileBrowser() {
         addToast,
         setSelectedFiles
     } = useAppStore();
+
+    // ---- Sync current folder <-> URL (?folder=ID) ----
+    const [searchParams, setSearchParams] = useSearchParams();
+    const urlFolderRaw = searchParams.get('folder');
+    const urlFolderId = urlFolderRaw && /^\d+$/.test(urlFolderRaw) ? Number(urlFolderRaw) : null;
+    const prevStoreFolderId = useRef<number | null>(currentFolderId ?? null);
+
+    // URL -> store (first load, reload, browser back/forward)
+    useEffect(() => {
+        if (urlFolderId === (currentFolderId ?? null)) return;
+        setCurrentFolderId(urlFolderId);
+        if (urlFolderId === null) {
+            setBreadcrumbs([{ id: null, name: 'My Files' }]);
+        } else {
+            const idx = breadcrumbs.findIndex(b => b.id === urlFolderId);
+            if (idx >= 0) {
+                setBreadcrumbs(breadcrumbs.slice(0, idx + 1));
+            } else {
+                // Reload: we only know the id, the real name is not available yet
+                setBreadcrumbs([{ id: null, name: 'My Files' }, { id: urlFolderId, name: '…' }]);
+            }
+        }
+        clearSelection();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [urlFolderId]);
+
+    // store -> URL (click on a folder, breadcrumb, sidebar...)
+    useEffect(() => {
+        const id = currentFolderId ?? null;
+        if (id === prevStoreFolderId.current) return;
+        prevStoreFolderId.current = id;
+        if (id === urlFolderId) return;
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev);
+            if (id === null) next.delete('folder');
+            else next.set('folder', String(id));
+            return next;
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentFolderId]);
 
     // Pagination state
     const [page, setPage] = useState(1);

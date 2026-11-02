@@ -15,6 +15,40 @@ from .database import async_session
 from .models import User, File, Folder, LoginCode
 from .config import get_settings
 from .auth import create_access_token
+import mimetypes
+
+_EXT_MIME = {
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".m4v": "video/x-m4v",
+    ".ts": "video/mp2t",
+    ".wmv": "video/x-ms-wmv",
+    ".flv": "video/x-flv",
+    ".mpg": "video/mpeg",
+    ".mpeg": "video/mpeg",
+    ".3gp": "video/3gpp",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".wav": "audio/wav",
+    ".opus": "audio/ogg",
+}
+
+
+def resolve_media(mime_type, file_name, default="document"):
+    """Return (file_type, mime_type) using MIME first, then the file extension."""
+    mime = (mime_type or "").lower()
+    if not mime or mime == "application/octet-stream":
+        ext = "." + file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+        mime = _EXT_MIME.get(ext) or mimetypes.guess_type(file_name)[0] or mime
+    if mime.startswith("video/"):
+        return "video", mime
+    if mime.startswith("audio/"):
+        return "audio", mime
+    return default, (mime or None)
 
 settings = get_settings()
 
@@ -532,16 +566,20 @@ async def handle_file(client, message: Message):
         
         # Extract file info
         raw_filename = getattr(media, "file_name", None) or f"{file_type}_{message.id}"
+        detected_type, detected_mime = resolve_media(getattr(media, "mime_type", None), raw_filename, file_type)
+        file_type = detected_type
         file_info = {
             "file_id": media.file_id,
             "file_unique_id": media.file_unique_id,
             "file_name": sanitize_filename(raw_filename),
             "file_size": media.file_size,
-            "mime_type": getattr(media, "mime_type", None),
+            "mime_type": detected_mime,
             "duration": getattr(media, "duration", None),
             "width": getattr(media, "width", None),
             "height": getattr(media, "height", None),
-            "thumbnail_file_id": media.thumbs[0].file_id if getattr(media, "thumbs", None) else None,
+            "thumbnail_file_id": media.thumbs[0].file_id
+            if getattr(media, "thumbs", None)
+            else None,
         }
         
         # Save to database

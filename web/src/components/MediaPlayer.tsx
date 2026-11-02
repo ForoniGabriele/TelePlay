@@ -350,7 +350,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 if (cached) { apply(cached.tracks); return; }
 
                 const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
-                const extracted: any[] = await extractSubtitles(authorizedStreamUrl, { verbose: false });
+                const extracted: any[] = await extractSubtitles(authorizedStreamUrl, { verbose: false, concurrency: 5 });
                 if (cancelled) return;
 
                 const entries: CachedSubs['tracks'] = [];

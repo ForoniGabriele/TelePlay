@@ -393,7 +393,25 @@ async def batch_move_files(
     await db.commit()
     return {"message": f"Moved {len(file_ids)} files"}
 
-
+_EXT_MIME = {
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".m4v": "video/x-m4v",
+    ".ts": "video/mp2t",
+    ".wmv": "video/x-ms-wmv",
+    ".flv": "video/x-flv",
+    ".mpg": "video/mpeg",
+    ".mpeg": "video/mpeg",
+    ".3gp": "video/3gpp",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".wav": "audio/wav",
+    ".opus": "audio/ogg",
+}
 def detect_file_type(mime_type: Optional[str]) -> str:
     """Map a MIME type to the file types used by the library."""
     mime = (mime_type or "").lower()
@@ -434,7 +452,10 @@ async def upload_file(
     file_name = sanitize_filename(file.filename or "unnamed_file")
     mime_type = file.content_type
     if not mime_type or mime_type == "application/octet-stream":
-        mime_type = mimetypes.guess_type(file_name)[0] or mime_type
+        ext = os.path.splitext(file_name)[1].lower()
+        mime_type = (
+            _EXT_MIME.get(ext) or mimetypes.guess_type(file_name)[0] or mime_type
+        )
     file_type = detect_file_type(mime_type)
 
     tmp_path = None
@@ -510,7 +531,7 @@ async def upload_file(
             file_unique_id=media.file_unique_id,
             file_name=file_name,
             file_size=getattr(media, "file_size", None) or total,
-            mime_type=getattr(media, "mime_type", None) or mime_type,
+            mime_type=mime_type or getattr(media, "mime_type", None),
             file_type=file_type,
             duration=int(media_duration) if media_duration else None,
             width=getattr(media, "width", None) or width,

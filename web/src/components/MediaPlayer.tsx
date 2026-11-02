@@ -10,6 +10,9 @@ import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipFor
 import { TelegramFile, formatDuration, useUpdateProgress, useFile, api } from '../lib/api';
 import { useAppStore } from '../lib/store';
 
+// Set to true to turn on the first embedded subtitle track automatically
+const AUTO_ENABLE_SUBTITLES = false;
+
 // ---- Subtitle types ----
 interface SubtitleCue {
     start: number; // seconds
@@ -24,27 +27,63 @@ interface SubtitleTrackOption {
     trackNumber?: number;
 }
 
-// Minimal SRT/VTT parser: returns an array of cues.
-// Supports both "00:00:01,000 --> 00:00:04,000" (SRT) and "00:00:01.000 --> 00:00:04.000" (VTT)
-function parseSubtitles(raw: string): SubtitleCue[] {
+// Subtitle parsers: SRT / VTT / ASS-SSA (auto-detected from the content)
+const stripTags = (t: string) => t.replace(/<[^>]+>/g, '').replace(/\{\\[^}]*\}/g, '');
+
+function parseSrtVtt(raw: string): SubtitleCue[] {
     const cues: SubtitleCue[] = [];
     const blocks = raw.replace(/\r\n/g, '\n').split(/\n{2,}/);
     const timeRe = /(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})/;
+    const toSec = (h: string, mnt: string, s: string, ms: string) =>
+        parseInt(h) * 3600 + parseInt(mnt) * 60 + parseInt(s) + parseInt(ms) / 1000;
     for (const block of blocks) {
         const lines = block.trim().split('\n');
-        const timeLine = lines.find(l => timeRe.test(l));
-        if (!timeLine) continue;
-        const m = timeLine.match(timeRe);
+        const timeIdx = lines.findIndex(l => timeRe.test(l));
+        if (timeIdx < 0) continue;
+        const m = lines[timeIdx].match(timeRe);
         if (!m) continue;
-        const toSec = (h: string, mnt: string, s: string, ms: string) =>
-            parseInt(h) * 3600 + parseInt(mnt) * 60 + parseInt(s) + parseInt(ms) / 1000;
-        const start = toSec(m[1], m[2], m[3], m[4]);
-        const end = toSec(m[5], m[6], m[7], m[8]);
-        const textLines = lines.filter(l => l !== timeLine && !/^\d+$/.test(l.trim()));
-        const text = textLines.join('\n').trim();
-        if (text) cues.push({ start, end, text });
+        const text = stripTags(lines.slice(timeIdx + 1).join('\n')).trim();
+        if (text) cues.push({ start: toSec(m[1], m[2], m[3], m[4]), end: toSec(m[5], m[6], m[7], m[8]), text });
     }
     return cues;
+}
+
+function parseAss(raw: string): SubtitleCue[] {
+    const cues: SubtitleCue[] = [];
+    const toSec = (t: string) => {
+        const m = t.trim().match(/^(\d+):(\d{2}):(\d{2})(?:[.,](\d+))?$/);
+        if (!m) return NaN;
+        return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]) + (m[4] ? parseFloat('0.' + m[4]) : 0);
+    };
+    // Default column layout, overridden by the "Format:" line of the [Events] section
+    let fields = ['layer', 'start', 'end', 'style', 'name', 'marginl', 'marginr', 'marginv', 'effect', 'text'];
+    for (const line of raw.replace(/\r\n/g, '\n').split('\n')) {
+        if (/^Format:/i.test(line) && /\bstart\b/i.test(line) && /\btext\b/i.test(line)) {
+            fields = line.slice(line.indexOf(':') + 1).split(',').map(f => f.trim().toLowerCase());
+            continue;
+        }
+        if (!/^Dialogue:/i.test(line)) continue;
+        let rest = line.slice(line.indexOf(':') + 1);
+        const parts: string[] = [];
+        for (let i = 0; i < fields.length - 1; i++) {
+            const k = rest.indexOf(',');
+            if (k < 0) break;
+            parts.push(rest.slice(0, k));
+            rest = rest.slice(k + 1);
+        }
+        parts.push(rest);
+        const start = toSec(parts[fields.indexOf('start')] ?? '');
+        const end = toSec(parts[fields.indexOf('end')] ?? '');
+        const rawText = parts[fields.indexOf('text')] ?? '';
+        if (isNaN(start) || isNaN(end) || /\\p[1-9]/.test(rawText)) continue; // skip drawings/typesetting
+        const text = rawText.replace(/\{[^}]*\}/g, '').replace(/\\[Nn]/g, '\n').replace(/\\h/g, ' ').trim();
+        if (text) cues.push({ start, end, text });
+    }
+    return cues.sort((a, b) => a.start - b.start);
+}
+
+function parseSubtitles(raw: string): SubtitleCue[] {
+    return /\[Events\]/i.test(raw) || /^Dialogue:/m.test(raw) ? parseAss(raw) : parseSrtVtt(raw);
 }
 
 // Builds a readable name for an audio/subtitle track
@@ -101,6 +140,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [showSubtitleMenu, setShowSubtitleMenu] = useState(false);
     const [isExtractingSubs, setIsExtractingSubs] = useState(false);
     const subtitleCuesRef = useRef<SubtitleCue[]>([]);
+    const subtitleCacheRef = useRef<Map<number | string, SubtitleCue[]>>(new Map());
+    const [playerReady, setPlayerReady] = useState(false);
     const selectedSubtitleRef = useRef<number | string | null>(null);
 
     // Keep the ref in sync so the overlay plugin can read it
@@ -109,6 +150,16 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     }, [selectedSubtitle]);
 
     const isVideo = file.file_type === 'video';
+
+    const token = localStorage.getItem('access_token');
+    const getAbsoluteUrl = (url: string) => !url ? '' : url.startsWith('http') ? url : `${window.location.origin}${url}`;
+    const relativeStreamUrl = `${file.stream_url}?token=${token}`;
+    const authorizedStreamUrl = getAbsoluteUrl(relativeStreamUrl);
+    const externalUrl = publicUrl || authorizedStreamUrl;
+    const vlcUrl = `vlc://${externalUrl}`;
+    const relativeThumbnailUrl = file.thumbnail_url ? `${file.thumbnail_url}?token=${token}` : null;
+    const authorizedThumbnailUrl = relativeThumbnailUrl ? getAbsoluteUrl(relativeThumbnailUrl) : null;
+
 
     const { data: extendedFile } = useFile(file.id);
     const { mutate: updateProgress } = useUpdateProgress();
@@ -241,54 +292,52 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         setShowSubtitleMenu(false);
     };
 
-    // Extract subtitles from the MKV when a subtitle track is selected
+    // The overlay reads the cues of the selected track from this ref
     useEffect(() => {
-        if (!selectedSubtitle || !isVideo || !authorizedStreamUrl) {
-            subtitleCuesRef.current = [];
-            return;
-        }
+        subtitleCuesRef.current = selectedSubtitle == null ? [] : (subtitleCacheRef.current.get(selectedSubtitle) ?? []);
+    }, [selectedSubtitle, subtitleTracks]);
 
+    // Scan the embedded subtitle tracks in the background, once the video is already playing.
+    // Every text track is parsed once and cached, so picking one from the menu is instant.
+    useEffect(() => {
+        if (!isVideo || !playerReady) return;
         let cancelled = false;
+        subtitleCacheRef.current.clear();
         setIsExtractingSubs(true);
 
         (async () => {
             try {
                 const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
+                const extracted: any[] = await extractSubtitles(authorizedStreamUrl, { verbose: false });
                 if (cancelled) return;
 
-                // Find the track metadata for the selected subtitle
-                const trackMeta = subtitleTracks.find(t => t.id === selectedSubtitle);
-                const trackNumber = trackMeta?.trackNumber;
-
-                const tracks = await extractSubtitles(authorizedStreamUrl, {
-                    verbose: true,
+                const options: SubtitleTrackOption[] = [];
+                extracted.forEach((t: any, i: number) => {
+                    if (!t?.output?.subtitle) return; // image-based tracks (PGS/VobSub) can't be rendered
+                    const cues = parseSubtitles(new TextDecoder().decode(t.output.subtitle));
+                    if (cues.length === 0) return;
+                    const id = t.metadata?.trackNumber ?? i;
+                    subtitleCacheRef.current.set(id, cues);
+                    options.push({
+                        id,
+                        label: describeTrack({ name: t.metadata?.trackName, language: t.metadata?.language }, i),
+                        language: t.metadata?.language,
+                        trackNumber: t.metadata?.trackNumber,
+                    });
                 });
 
-                if (cancelled) return;
-
-                // Pick the matching track (by trackNumber if available, otherwise first)
-                const track = trackNumber != null
-                    ? tracks.find((t: any) => t.metadata?.trackNumber === trackNumber)
-                    : tracks[0];
-
-                if (track && track.output?.subtitle) {
-                    const raw = new TextDecoder().decode(track.output.subtitle);
-                    subtitleCuesRef.current = parseSubtitles(raw);
-                    console.log(`Sottotitoli caricati: ${subtitleCuesRef.current.length} cue (tipo: ${track.type})`);
-                } else {
-                    console.warn('Nessuna traccia sottotitoli trovata nell\'MKV');
-                    subtitleCuesRef.current = [];
-                }
+                setSubtitleTracks(options);
+                if (AUTO_ENABLE_SUBTITLES && options.length > 0) setSelectedSubtitle(options[0].id);
             } catch (err) {
-                console.error('Errore estrazione sottotitoli:', err);
-                subtitleCuesRef.current = [];
+                console.error('Subtitle scan failed:', err);
             } finally {
                 if (!cancelled) setIsExtractingSubs(false);
             }
         })();
 
         return () => { cancelled = true; };
-    }, [selectedSubtitle, isVideo, authorizedStreamUrl, subtitleTracks]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isVideo, file.id, playerReady]);
 
     // Create / destroy the MediaFox player and register the subtitle overlay plugin
     useEffect(() => {
@@ -300,6 +349,9 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
         setIsLoading(true);
         setError(null);
+        setPlayerReady(false);
+        setSubtitleTracks([]);
+        setSelectedSubtitle(null);
         advTime.current = 0;
 
         (async () => {
@@ -323,10 +375,10 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                 render(ctx: CanvasRenderingContext2D, time: number, { width, height }: { width: number; height: number }) {
                                     if (selectedSubtitleRef.current == null) return;
                                     const cues = subtitleCuesRef.current;
-                                    const cue = cues.find((c: SubtitleCue) => time >= c.start && time <= c.end);
-                                    if (!cue) return;
+                                    const active = cues.filter((c: SubtitleCue) => time >= c.start && time <= c.end);
+                                    if (active.length === 0) return;
 
-                                    const lines = cue.text.split('\n');
+                                    const lines = active.flatMap((c: SubtitleCue) => c.text.split('\n'));
                                     const fontSize = Math.max(16, Math.floor(height * 0.045));
                                     ctx.font = `bold ${fontSize}px sans-serif`;
                                     ctx.textAlign = 'center';
@@ -371,27 +423,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 await player.load(authorizedStreamUrl);
                 if (cancelled) return;
 
-                // --- AGGIUNTA: Auto-scansione e attivazione automatica dei sottotitoli ---
-                try {
-                    const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
-                    const tracksExtracted = await extractSubtitles(authorizedStreamUrl, { verbose: false });
-
-                    if (tracksExtracted && tracksExtracted.length > 0) {
-                        const mappedTracks = tracksExtracted.map((t: any, i: number) => ({
-                            id: t.metadata?.trackNumber ?? i,
-                            label: describeTrack({ name: t.metadata?.trackName, language: t.metadata?.language }, i),
-                            language: t.metadata?.language,
-                            trackNumber: t.metadata?.trackNumber,
-                        }));
-
-                        setSubtitleTracks(mappedTracks);
-                        setSelectedSubtitle(mappedTracks[0].id); // Seleziona automaticamente la prima traccia
-                    }
-                } catch (err) {
-                    console.error('Scansione automatica sottotitoli fallita:', err);
-                }
-                // ------------------------------------------------------------------------
-
                 // Audio tracks
                 const tracks: any[] = player.getAudioTracks?.() ?? [];
                 setAudioTracks(tracks.map((t, i) => ({ id: t.id, label: describeTrack(t, i) })));
@@ -402,6 +433,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 if (cancelled) return;
 
                 setIsLoading(false);
+                setPlayerReady(true); // video is up: now the subtitle scan can start
                 await player.play();
             } catch (err) {
                 console.error('Advanced player failed:', err);
@@ -457,15 +489,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     }, [error, file.id, isVideo]);
 
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
-
-    const token = localStorage.getItem('access_token');
-    const getAbsoluteUrl = (url: string) => !url ? '' : url.startsWith('http') ? url : `${window.location.origin}${url}`;
-    const relativeStreamUrl = `${file.stream_url}?token=${token}`;
-    const authorizedStreamUrl = getAbsoluteUrl(relativeStreamUrl);
-    const externalUrl = publicUrl || authorizedStreamUrl;
-    const vlcUrl = `vlc://${externalUrl}`;
-    const relativeThumbnailUrl = file.thumbnail_url ? `${file.thumbnail_url}?token=${token}` : null;
-    const authorizedThumbnailUrl = relativeThumbnailUrl ? getAbsoluteUrl(relativeThumbnailUrl) : null;
 
     const MediaElement = isVideo ? (
         <canvas ref={canvasRef} onClick={togglePlay} className={`max-w-full max-h-full w-full h-full object-contain bg-black ${isMinimized ? 'hidden' : ''}`} />
@@ -525,7 +548,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         {isExtractingSubs && !isMinimized && (
                             <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-40 bg-dark-800/90 backdrop-blur px-4 py-2 rounded-lg text-sm text-white flex items-center gap-2">
                                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-500"></div>
-                                Estrazione sottotitoli...
+                                Ricerca sottotitoli…
                             </div>
                         )}
                     </>
@@ -592,7 +615,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                             <p className="px-3 py-2 text-xs text-dark-400">Sottotitoli</p>
                                             <button onClick={() => { setSelectedSubtitle(null); setShowSubtitleMenu(false); }} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === null ? 'text-primary-300' : 'text-white'}`}><span>Disattivati</span>{selectedSubtitle === null && <Check className="w-4 h-4 shrink-0" />}</button>
                                             {subtitleTracks.length === 0 && (
-                                                <p className="px-3 py-2 text-xs text-dark-400">Nessuna traccia trovata automaticamente</p>
+                                                <p className="px-3 py-2 text-xs text-dark-400">{isExtractingSubs ? 'Ricerca sottotitoli in corso…' : 'Nessun sottotitolo incorporato trovato'}</p>
                                             )}
                                             {subtitleTracks.map((track) => (
                                                 <button key={String(track.id)} onClick={() => selectSubtitleTrack(track.id)} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === track.id ? 'text-primary-300' : 'text-white'}`}>

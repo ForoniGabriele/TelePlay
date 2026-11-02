@@ -1,13 +1,12 @@
 /**
  * MediaPlayer - full screen video/audio player
- * Video: uses the browser's NATIVE controls (<video controls>)
- * Video (advanced): optional MediaFox/Mediabunny player (canvas + Web Audio) that
- *   can switch between the audio tracks of a file (languages). Started from the
- *   "Audio tracks" button, or from the error screen when the browser can't play the file.
- * Audio: keeps the custom UI
+ * Video: uses ONLY the advanced MediaFox/Mediabunny player (canvas + Web Audio).
+ *   The native browser <video controls> player has been removed because it cannot
+ *   play MKV files. Audio track switching (languages) is available from the top bar.
+ * Audio: keeps the custom UI.
  */
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipForward, Download, ExternalLink, AlertTriangle, Copy, PictureInPicture2, Gauge, ChevronDown, ChevronUp, Languages, Check } from 'lucide-react';
+import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipForward, Download, ExternalLink, AlertTriangle, Copy, Gauge, ChevronDown, ChevronUp, Languages, Check } from 'lucide-react';
 import { TelegramFile, formatDuration, useUpdateProgress, useFile, api } from '../lib/api';
 import { useAppStore } from '../lib/store';
 
@@ -40,8 +39,13 @@ interface MediaPlayerContentProps {
 }
 
 function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaPlayerContentProps) {
-    const videoRef = useRef<HTMLVideoElement>(null);
+    const audioRef = useRef<HTMLAudioElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const playerRef = useRef<any>(null);          // MediaFox instance while the advanced player is active
+    const advTime = useRef(0);                    // current time reported by the advanced player
+    const advDuration = useRef(0);
+
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
@@ -50,7 +54,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [showControls, setShowControls] = useState(true);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [playbackSpeed, setPlaybackSpeed] = useState(1);
-    const [isPiP, setIsPiP] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const hideControlsTimeout = useRef<ReturnType<typeof setTimeout>>();
@@ -58,24 +61,15 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const resumeApplied = useRef(false);
 
     // ---- Advanced player (MediaFox) state ----
-    const [advanced, setAdvanced] = useState(false);
     const [audioTracks, setAudioTracks] = useState<AudioTrackOption[]>([]);
     const [selectedAudio, setSelectedAudio] = useState<number | string | null>(null);
     const [showAudioMenu, setShowAudioMenu] = useState(false);
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const playerRef = useRef<any>(null);          // MediaFox instance while the advanced player is active
-    const advancedModeRef = useRef(false);        // mirrors `advanced`, readable from callbacks/unmount
-    const advTime = useRef(0);                    // current time reported by the advanced player
-    const advDuration = useRef(0);
-    const resumeAt = useRef<number | null>(null); // position to restore when switching player
 
-    advancedModeRef.current = advanced;
+    const isVideo = file.file_type === 'video';
 
     // Fetch fresh file details to get latest progress
     const { data: extendedFile } = useFile(file.id);
     const { mutate: updateProgress } = useUpdateProgress();
-
-    const isVideo = file.file_type === 'video';
 
     // Auto-ensure public link exists for VLC/Download/Copy
     useEffect(() => {
@@ -102,32 +96,15 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         resumeApplied.current = false;
     }, [file.id]);
 
-    // Restore progress (applied once, as soon as metadata is available)
-    const applyResume = useCallback(() => {
-        const el = videoRef.current;
-        if (!el || resumeApplied.current || !extendedFile?.last_pos) return;
-        if (el.readyState < 1) return; // metadata not loaded yet
-        const totalDuration = extendedFile.duration || el.duration || 0;
-        if (extendedFile.last_pos < totalDuration * 0.95) {
-            el.currentTime = extendedFile.last_pos;
-            setCurrentTime(extendedFile.last_pos);
-        }
-        resumeApplied.current = true;
-    }, [extendedFile]);
-
-    useEffect(() => {
-        applyResume();
-    }, [applyResume]);
-
     // Current position/duration, from whichever player is active
     const snapshotProgress = useCallback(() => {
-        if (advancedModeRef.current) {
+        if (isVideo) {
             return { position: advTime.current, duration: advDuration.current || undefined };
         }
-        const el = videoRef.current;
+        const el = audioRef.current;
         if (!el) return null;
         return { position: el.currentTime, duration: el.duration };
-    }, []);
+    }, [isVideo]);
 
     // Save on close/pause
     const saveProgress = useCallback(() => {
@@ -160,12 +137,46 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         return () => saveProgress();
     }, [saveProgress]);
 
-    // Play/pause state follows the real media element events
+    // ---- Audio element events (audio files only) ----
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => {
         setIsPlaying(false);
         saveProgress();
     };
+
+    const handleTimeUpdate = () => {
+        if (audioRef.current) {
+            setCurrentTime(audioRef.current.currentTime);
+        }
+    };
+
+    const handleLoadedMetadata = () => {
+        const el = audioRef.current;
+        if (el) {
+            setDuration(el.duration);
+            setIsLoading(false);
+            if (!resumeApplied.current && extendedFile?.last_pos) {
+                const totalDuration = extendedFile.duration || el.duration || 0;
+                if (extendedFile.last_pos < totalDuration * 0.95) {
+                    el.currentTime = extendedFile.last_pos;
+                    setCurrentTime(extendedFile.last_pos);
+                }
+                resumeApplied.current = true;
+            }
+        }
+    };
+
+    const handleWaiting = () => setIsLoading(true);
+    const handlePlaying = () => setIsLoading(false);
+
+    const handleError = () => {
+        if (audioRef.current?.error) {
+            setError("An error occurred while trying to play this file.");
+            setIsLoading(false);
+        }
+    };
+
+    // ---- Playback controls ----
 
     const togglePlay = (e?: any) => {
         e?.stopPropagation();
@@ -178,7 +189,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             }
             return;
         }
-        const el = videoRef.current;
+        const el = audioRef.current;
         if (!el) return;
         if (el.paused) {
             el.play().catch(() => { });
@@ -194,8 +205,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             setIsMuted(!isMuted);
             return;
         }
-        if (videoRef.current) {
-            videoRef.current.muted = !isMuted;
+        if (audioRef.current) {
+            audioRef.current.muted = !isMuted;
             setIsMuted(!isMuted);
         }
     };
@@ -210,16 +221,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         }
     };
 
-    const togglePiP = async () => {
-        if (document.pictureInPictureElement) {
-            await document.exitPictureInPicture();
-            setIsPiP(false);
-        } else if (videoRef.current) {
-            await videoRef.current.requestPictureInPicture();
-            setIsPiP(true);
-        }
-    };
-
     const cycleSpeed = () => {
         const speeds = [0.5, 1, 1.25, 1.5, 2];
         const currentIndex = speeds.indexOf(playbackSpeed);
@@ -227,45 +228,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         setPlaybackSpeed(nextSpeed);
         if (playerRef.current) {
             playerRef.current.playbackRate = nextSpeed;
-        } else if (videoRef.current) {
-            videoRef.current.playbackRate = nextSpeed;
-        }
-    };
-
-    const handleTimeUpdate = () => {
-        if (videoRef.current) {
-            setCurrentTime(videoRef.current.currentTime);
-        }
-    };
-
-    const handleLoadedMetadata = () => {
-        if (videoRef.current) {
-            setDuration(videoRef.current.duration);
-            setIsLoading(false);
-            if (resumeAt.current != null) {
-                // Coming back from the advanced player: continue from where it was
-                videoRef.current.currentTime = resumeAt.current;
-                setCurrentTime(resumeAt.current);
-                resumeAt.current = null;
-                resumeApplied.current = true;
-            } else {
-                applyResume();
-            }
-        }
-    };
-
-    const handleWaiting = () => setIsLoading(true);
-    const handlePlaying = () => setIsLoading(false);
-
-    const handleError = () => {
-        if (videoRef.current?.error) {
-            const code = videoRef.current.error.code;
-            if (code === 3 || code === 4) { // MEDIA_ERR_DECODE or MEDIA_ERR_SRC_NOT_SUPPORTED
-                setError("Browser cannot decode this video format.");
-            } else {
-                setError("An error occurred while trying to play this video.");
-            }
-            setIsLoading(false);
+        } else if (audioRef.current) {
+            audioRef.current.playbackRate = nextSpeed;
         }
     };
 
@@ -277,8 +241,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             setCurrentTime(target);
             return;
         }
-        if (videoRef.current) {
-            videoRef.current.currentTime += seconds;
+        if (audioRef.current) {
+            audioRef.current.currentTime += seconds;
         }
     };
 
@@ -290,8 +254,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             setCurrentTime(time);
             return;
         }
-        if (videoRef.current) {
-            videoRef.current.currentTime = time;
+        if (audioRef.current) {
+            audioRef.current.currentTime = time;
             setCurrentTime(time);
         }
     };
@@ -302,39 +266,14 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             playerRef.current.volume = vol;
             setVolume(vol);
             setIsMuted(vol === 0);
-        } else if (videoRef.current) {
-            videoRef.current.volume = vol;
+        } else if (audioRef.current) {
+            audioRef.current.volume = vol;
             setVolume(vol);
             setIsMuted(vol === 0);
         }
     };
 
-    // ---- Advanced player: start / stop / audio track selection ----
-
-    // Switch to the advanced player (also used as a fallback when the browser can't play the file)
-    const startAdvanced = () => {
-        if (!isVideo || advanced) return;
-        const el = videoRef.current;
-        resumeAt.current = el ? el.currentTime : (extendedFile?.last_pos ?? 0);
-        el?.pause();
-        setError(null);
-        setIsLoading(true);
-        setIsPlaying(false);
-        setShowAudioMenu(false);
-        setAdvanced(true);
-    };
-
-    // Back to the standard browser player
-    const stopAdvanced = () => {
-        resumeAt.current = advTime.current;
-        setShowAudioMenu(false);
-        setAudioTracks([]);
-        setSelectedAudio(null);
-        setIsLoading(true);
-        setIsPlaying(false);
-        setAdvanced(false);
-    };
-
+    // ---- Advanced player: audio track selection ----
     const selectAudioTrack = async (id: number | string) => {
         const p = playerRef.current;
         if (!p) return;
@@ -347,16 +286,17 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         setShowAudioMenu(false);
     };
 
-    // Create / destroy the MediaFox player while advanced mode is on
+    // Create / destroy the MediaFox player for video files
     useEffect(() => {
-        if (!advanced || !canvasRef.current) return;
+        if (!isVideo || !canvasRef.current) return;
 
         let cancelled = false;
         let player: any = null;
         const unsubscribers: Array<() => void> = [];
 
         setIsLoading(true);
-        advTime.current = resumeAt.current ?? 0; // so closing right away doesn't save position 0
+        setError(null);
+        advTime.current = 0;
 
         (async () => {
             try {
@@ -387,8 +327,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
                 player.on?.('error', () => {
                     if (cancelled) return;
-                    setAdvanced(false);
-                    setError('The advanced player could not play this file.');
+                    setError('The player could not play this file. The format may not be supported.');
                     setIsLoading(false);
                 });
 
@@ -399,8 +338,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 setAudioTracks(tracks.map((t, i) => ({ id: t.id, label: describeTrack(t, i) })));
                 setSelectedAudio(tracks[0]?.id ?? null);
 
-                const start = resumeAt.current ?? 0;
-                resumeAt.current = null;
+                // Resume from the last saved position
+                const start = extendedFile?.last_pos ?? 0;
                 if (start > 1) await player.seek(start);
                 if (cancelled) return;
 
@@ -409,8 +348,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             } catch (err) {
                 console.error('Advanced player failed:', err);
                 if (!cancelled) {
-                    setAdvanced(false);
-                    setError('The advanced player could not load this file.');
+                    setError('The player could not load this file. The format may not be supported.');
                     setIsLoading(false);
                 }
             }
@@ -428,7 +366,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             playerRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [advanced, file.id]);
+    }, [isVideo, file.id]);
 
     // Keep fullscreen state in sync (also when the user exits with the browser UI)
     useEffect(() => {
@@ -476,7 +414,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isFullscreen, onClose, error, isPlaying, isMinimized, isMuted, advanced]);
+    }, [isFullscreen, onClose, error, isPlaying, isMinimized, isMuted]);
 
     const handleMouseMove = () => {
         setShowControls(true);
@@ -488,12 +426,12 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         }, 3000);
     };
 
-    // Auto-play effect (standard player only; the advanced player starts itself)
+    // Auto-play effect for audio files only (the video player starts itself)
     useEffect(() => {
-        if (videoRef.current && !error && !advanced) {
-            videoRef.current.play().catch(() => { });
+        if (!isVideo && audioRef.current && !error) {
+            audioRef.current.play().catch(() => { });
         }
-    }, [error, file.id, advanced]); // Re-run when file or player changes
+    }, [error, file.id, isVideo]);
 
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
 
@@ -514,34 +452,16 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const relativeThumbnailUrl = file.thumbnail_url ? `${file.thumbnail_url}?token=${token}` : null;
     const authorizedThumbnailUrl = relativeThumbnailUrl ? getAbsoluteUrl(relativeThumbnailUrl) : null;
 
-    // Common Media Element
+    // Media element: canvas for video, audio element for audio
     const MediaElement = isVideo ? (
-        advanced ? (
-            <canvas
-                ref={canvasRef}
-                onClick={togglePlay}
-                className={`max-w-full max-h-full w-full h-full object-contain bg-black ${isMinimized ? 'hidden' : ''}`}
-            />
-        ) : (
-            <video
-                ref={videoRef}
-                src={authorizedStreamUrl}
-                className={`max-w-full max-h-full w-full h-full object-contain bg-black ${isMinimized ? 'hidden' : ''}`}
-                onPlay={handlePlay}
-                onPause={handlePause}
-                onTimeUpdate={handleTimeUpdate}
-                onLoadedMetadata={handleLoadedMetadata}
-                onWaiting={handleWaiting}
-                onPlaying={handlePlaying}
-                onError={handleError}
-                controls
-                preload="metadata"
-                playsInline
-            />
-        )
+        <canvas
+            ref={canvasRef}
+            onClick={togglePlay}
+            className={`max-w-full max-h-full w-full h-full object-contain bg-black ${isMinimized ? 'hidden' : ''}`}
+        />
     ) : (
         <audio
-            ref={videoRef as React.RefObject<HTMLAudioElement>}
+            ref={audioRef}
             src={authorizedStreamUrl}
             onPlay={handlePlay}
             onPause={handlePause}
@@ -555,19 +475,19 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
     const overlayVisible = showControls || !isPlaying;
 
-    // Custom controls are shown for audio files and for the advanced video player
-    const showCustomControls = !isVideo || advanced;
+    // Custom controls are always shown: the native video controls no longer exist
+    const showCustomControls = true;
 
     // Unified Render
     return (
         <div
             ref={containerRef}
             className={`fixed transition-all duration-300 ease-in-out z-[100] ${isMinimized
-                    ? 'bottom-0 left-0 right-0 h-20 bg-dark-900 border-t border-white/10 shadow-2xl'
-                    : 'inset-0 bg-black flex items-center justify-center font-sans'
+                ? 'bottom-0 left-0 right-0 h-20 bg-dark-900 border-t border-white/10 shadow-2xl'
+                : 'inset-0 bg-black flex items-center justify-center font-sans'
                 }`}
             onMouseMove={!isMinimized ? handleMouseMove : undefined}
-            onDoubleClick={!isMinimized && showCustomControls ? toggleFullscreen : undefined}
+            onDoubleClick={!isMinimized ? toggleFullscreen : undefined}
         >
             {/* Media Element - Always present */}
             <div className={`w-full h-full ${isMinimized ? 'hidden' : 'flex items-center justify-center'}`}>
@@ -580,15 +500,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         <p className="text-dark-300 mb-6">{error}</p>
 
                         <div className="flex flex-col gap-3">
-                            {isVideo && (
-                                <Button
-                                    onClick={(e) => { e.stopPropagation(); startAdvanced(); }}
-                                    className="btn-secondary flex items-center justify-center gap-2"
-                                >
-                                    <Languages className="w-4 h-4" />
-                                    Try the advanced player
-                                </Button>
-                            )}
                             <a
                                 href={vlcUrl}
                                 className="btn-primary flex items-center justify-center gap-2"
@@ -714,12 +625,11 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 </div>
             )}
 
-            {/* Overlay: top bar for everything, custom controls for audio and the advanced video player */}
+            {/* Overlay: top bar and custom controls */}
             {!error && !isMinimized && (
                 <div
-                    className={`absolute inset-0 transition-opacity duration-300 ${overlayVisible ? 'opacity-100' : 'opacity-0'} ${showCustomControls && !overlayVisible ? 'cursor-none' : ''}`}
-                    // With the native video controls the overlay must never block them
-                    style={{ pointerEvents: showCustomControls ? (overlayVisible ? 'auto' : 'none') : 'none' }}
+                    className={`absolute inset-0 transition-opacity duration-300 ${overlayVisible ? 'opacity-100' : 'opacity-0'} ${!overlayVisible ? 'cursor-none' : ''}`}
+                    style={{ pointerEvents: overlayVisible ? 'auto' : 'none' }}
                 >
                     {/* Top bar */}
                     <div
@@ -733,19 +643,18 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                             )}
                         </div>
                         <div className="flex items-center gap-2">
-                            {/* Audio tracks: switches to the advanced player, or opens the track menu */}
+                            {/* Audio tracks menu (video only) */}
                             {isVideo && (
                                 <div className="relative">
                                     <button
-                                        onClick={() => (advanced ? setShowAudioMenu((v) => !v) : startAdvanced())}
+                                        onClick={() => setShowAudioMenu((v) => !v)}
                                         className="p-2 text-white hover:bg-white/20 rounded-full transition-colors flex items-center gap-1.5"
-                                        title={advanced ? 'Audio tracks' : 'Audio tracks (switches to the advanced player)'}
+                                        title="Audio tracks"
                                     >
                                         <Languages className="w-5 h-5" />
-                                        {!advanced && <span className="text-xs hidden sm:inline">Audio tracks</span>}
                                     </button>
 
-                                    {advanced && showAudioMenu && (
+                                    {showAudioMenu && (
                                         <div className="absolute right-0 top-full mt-2 min-w-[230px] bg-dark-800/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl p-1 z-40">
                                             <p className="px-3 py-2 text-xs text-dark-400">Audio</p>
                                             {audioTracks.length === 0 && (
@@ -761,14 +670,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                                     {selectedAudio === track.id && <Check className="w-4 h-4 shrink-0" />}
                                                 </button>
                                             ))}
-                                            <div className="border-t border-white/10 mt-1 pt-1">
-                                                <button
-                                                    onClick={stopAdvanced}
-                                                    className="w-full px-3 py-2 rounded-lg text-sm text-left text-dark-300 hover:text-white hover:bg-white/10 transition-colors"
-                                                >
-                                                    Back to standard player
-                                                </button>
-                                            </div>
                                         </div>
                                     )}
                                 </div>
@@ -789,7 +690,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     </div>
 
-                    {/* Custom controls: AUDIO files and the ADVANCED video player (standard video uses native controls) */}
+                    {/* Custom controls */}
                     {showCustomControls && (
                         <>
                             {/* Center large controls */}
@@ -889,20 +790,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                             <Gauge className="w-4 h-4" />
                                             <span>{playbackSpeed}x</span>
                                         </button>
-
-                                        {/* PiP (not available for the canvas-based advanced player) */}
-                                        {isVideo && !advanced && document.pictureInPictureEnabled && (
-                                            <button
-                                                onClick={togglePiP}
-                                                className={`p-2 rounded-lg transition-all ${isPiP
-                                                    ? 'bg-primary-500/30 text-primary-300'
-                                                    : 'hover:bg-white/10 text-white/80 hover:text-white'
-                                                    }`}
-                                                title="Picture in Picture"
-                                            >
-                                                <PictureInPicture2 className="w-5 h-5" />
-                                            </button>
-                                        )}
 
                                         {/* Fullscreen */}
                                         <button

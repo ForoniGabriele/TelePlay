@@ -1,122 +1,15 @@
 /**
  * MediaPlayer - full screen video/audio player
  * Video: uses ONLY the advanced MediaFox player (canvas + Web Audio).
- *   Subtitles are extracted from the MKV via @cryguy/mkv-subtitle-extractor
- *   and rendered via a MediaFox overlay plugin (onOverlay).
+ *   Subtitles extraction in-browser has been disabled due to performance issues.
+ *   A prominent "Open in VLC" button is provided for instant MKV playback with subtitles.
  * Audio: keeps the custom UI.
  */
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipForward, Download, ExternalLink, AlertTriangle, Copy, Gauge, ChevronDown, ChevronUp, Languages, Check, Subtitles } from 'lucide-react';
+import { X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipForward, Download, ExternalLink, AlertTriangle, Copy, Gauge, ChevronDown, ChevronUp, Languages, Check, MonitorPlay } from 'lucide-react';
 import { TelegramFile, formatDuration, useUpdateProgress, useFile, api } from '../lib/api';
 import { useAppStore } from '../lib/store';
 
-// Set to true to turn on the first embedded subtitle track automatically
-const AUTO_ENABLE_SUBTITLES = false;
-
-// ---- Subtitle types ----
-interface SubtitleCue {
-    start: number; // seconds
-    end: number;   // seconds
-    text: string;
-}
-
-interface SubtitleTrackOption {
-    id: number | string;
-    label: string;
-    language?: string;
-    trackNumber?: number;
-}
-
-// Subtitle parsers: SRT / VTT / ASS-SSA (auto-detected from the content)
-const stripTags = (t: string) => t.replace(/<[^>]+>/g, '').replace(/\{\\[^}]*\}/g, '');
-
-function parseSrtVtt(raw: string): SubtitleCue[] {
-    const cues: SubtitleCue[] = [];
-    const blocks = raw.replace(/\r\n/g, '\n').split(/\n{2,}/);
-    const timeRe = /(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})/;
-    const toSec = (h: string, mnt: string, s: string, ms: string) =>
-        parseInt(h) * 3600 + parseInt(mnt) * 60 + parseInt(s) + parseInt(ms) / 1000;
-    for (const block of blocks) {
-        const lines = block.trim().split('\n');
-        const timeIdx = lines.findIndex(l => timeRe.test(l));
-        if (timeIdx < 0) continue;
-        const m = lines[timeIdx].match(timeRe);
-        if (!m) continue;
-        const text = stripTags(lines.slice(timeIdx + 1).join('\n')).trim();
-        if (text) cues.push({ start: toSec(m[1], m[2], m[3], m[4]), end: toSec(m[5], m[6], m[7], m[8]), text });
-    }
-    return cues;
-}
-
-function parseAss(raw: string): SubtitleCue[] {
-    const cues: SubtitleCue[] = [];
-    const toSec = (t: string) => {
-        const m = t.trim().match(/^(\d+):(\d{2}):(\d{2})(?:[.,](\d+))?$/);
-        if (!m) return NaN;
-        return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]) + (m[4] ? parseFloat('0.' + m[4]) : 0);
-    };
-    // Default column layout, overridden by the "Format:" line of the [Events] section
-    let fields = ['layer', 'start', 'end', 'style', 'name', 'marginl', 'marginr', 'marginv', 'effect', 'text'];
-    for (const line of raw.replace(/\r\n/g, '\n').split('\n')) {
-        if (/^Format:/i.test(line) && /\bstart\b/i.test(line) && /\btext\b/i.test(line)) {
-            fields = line.slice(line.indexOf(':') + 1).split(',').map(f => f.trim().toLowerCase());
-            continue;
-        }
-        if (!/^Dialogue:/i.test(line)) continue;
-        let rest = line.slice(line.indexOf(':') + 1);
-        const parts: string[] = [];
-        for (let i = 0; i < fields.length - 1; i++) {
-            const k = rest.indexOf(',');
-            if (k < 0) break;
-            parts.push(rest.slice(0, k));
-            rest = rest.slice(k + 1);
-        }
-        parts.push(rest);
-        const start = toSec(parts[fields.indexOf('start')] ?? '');
-        const end = toSec(parts[fields.indexOf('end')] ?? '');
-        const rawText = parts[fields.indexOf('text')] ?? '';
-        if (isNaN(start) || isNaN(end) || /\\p[1-9]/.test(rawText)) continue; // skip drawings/typesetting
-        const text = rawText.replace(/\{[^}]*\}/g, '').replace(/\\[Nn]/g, '\n').replace(/\\h/g, ' ').trim();
-        if (text) cues.push({ start, end, text });
-    }
-    return cues.sort((a, b) => a.start - b.start);
-}
-
-function parseSubtitles(raw: string): SubtitleCue[] {
-    return /\[Events\]/i.test(raw) || /^Dialogue:/m.test(raw) ? parseAss(raw) : parseSrtVtt(raw);
-}
-
-// ---- Subtitle cache (IndexedDB): reopening a file shows subtitles instantly ----
-interface CachedSubs {
-    tracks: Array<{ option: SubtitleTrackOption; cues: SubtitleCue[] }>;
-}
-
-const openSubDb = () => new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open('teleplay-subtitles', 1);
-    req.onupgradeneeded = () => req.result.createObjectStore('subs');
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-});
-
-async function readSubCache(key: string): Promise<CachedSubs | null> {
-    try {
-        const db = await openSubDb();
-        return await new Promise((resolve) => {
-            const req = db.transaction('subs').objectStore('subs').get(key);
-            req.onsuccess = () => resolve((req.result as CachedSubs) ?? null);
-            req.onerror = () => resolve(null);
-        });
-    } catch { return null; }
-}
-
-async function writeSubCache(key: string, value: CachedSubs) {
-    try {
-        const db = await openSubDb();
-        db.transaction('subs', 'readwrite').objectStore('subs').put(value, key);
-    } catch { /* cache is best-effort */ }
-}
-
-// Builds a readable name for an audio/subtitle track
 function describeTrack(track: any, index: number): string {
     const name = track?.name || track?.label || track?.title;
     const lang = track?.language || track?.lang || track?.languageCode;
@@ -160,40 +53,27 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const resumeApplied = useRef(false);
 
     // ---- Audio tracks ----
-    const [audioTracks, setAudioTracks] = useState<SubtitleTrackOption[]>([]);
+    const [audioTracks, setAudioTracks] = useState<any[]>([]);
     const [selectedAudio, setSelectedAudio] = useState<number | string | null>(null);
     const [showAudioMenu, setShowAudioMenu] = useState(false);
 
-    // ---- Subtitle tracks (cues are what we actually render) ----
-    const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrackOption[]>([]);
-    const [selectedSubtitle, setSelectedSubtitle] = useState<number | string | null>(null);
-    const [showSubtitleMenu, setShowSubtitleMenu] = useState(false);
-    const [isExtractingSubs, setIsExtractingSubs] = useState(false);
-    const subtitleCuesRef = useRef<SubtitleCue[]>([]);
-    const subtitleCacheRef = useRef<Map<number | string, SubtitleCue[]>>(new Map());
-    const selectedSubtitleRef = useRef<number | string | null>(null);
-
-    // Keep the ref in sync so the overlay plugin can read it
-    useEffect(() => {
-        selectedSubtitleRef.current = selectedSubtitle;
-    }, [selectedSubtitle]);
-
     const isVideo = file.file_type === 'video';
+
+    const { data: extendedFile } = useFile(file.id);
+    const { mutate: updateProgress } = useUpdateProgress();
 
     const token = localStorage.getItem('access_token');
     const getAbsoluteUrl = (url: string) => !url ? '' : url.startsWith('http') ? url : `${window.location.origin}${url}`;
     const relativeStreamUrl = `${file.stream_url}?token=${token}`;
     const authorizedStreamUrl = getAbsoluteUrl(relativeStreamUrl);
     const externalUrl = publicUrl || authorizedStreamUrl;
+
+    // Protocol to open VLC. Note: VLC Desktop usually needs vlc://<url> or just the direct URL.
     const vlcUrl = `vlc://${externalUrl}`;
+
     const relativeThumbnailUrl = file.thumbnail_url ? `${file.thumbnail_url}?token=${token}` : null;
     const authorizedThumbnailUrl = relativeThumbnailUrl ? getAbsoluteUrl(relativeThumbnailUrl) : null;
 
-
-    const { data: extendedFile } = useFile(file.id);
-    const { mutate: updateProgress } = useUpdateProgress();
-
-    // Auto-ensure public link exists
     useEffect(() => {
         const ensurePublicLink = async () => {
             const fileData = extendedFile || file;
@@ -235,7 +115,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
     useEffect(() => () => saveProgress(), [saveProgress]);
 
-    // ---- Audio element events (audio files only) ----
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => { setIsPlaying(false); saveProgress(); };
     const handleTimeUpdate = () => { if (audioRef.current) setCurrentTime(audioRef.current.currentTime); };
@@ -260,7 +139,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         if (audioRef.current?.error) { setError("An error occurred while trying to play this file."); setIsLoading(false); }
     };
 
-    // ---- Playback controls ----
     const togglePlay = (e?: any) => {
         e?.stopPropagation();
         const p = playerRef.current;
@@ -307,7 +185,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         else if (audioRef.current) { audioRef.current.volume = vol; setVolume(vol); setIsMuted(vol === 0); }
     };
 
-    // ---- Track selection ----
     const selectAudioTrack = async (id: number | string) => {
         const p = playerRef.current;
         if (!p) return;
@@ -316,73 +193,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         setShowAudioMenu(false);
     };
 
-    const selectSubtitleTrack = (id: number | string) => {
-        setSelectedSubtitle(id);
-        setShowSubtitleMenu(false);
-    };
-
-    // The overlay reads the cues of the selected track from this ref
-    useEffect(() => {
-        subtitleCuesRef.current = selectedSubtitle == null ? [] : (subtitleCacheRef.current.get(selectedSubtitle) ?? []);
-    }, [selectedSubtitle, subtitleTracks]);
-
-    // Look for embedded subtitle tracks right away, in parallel with the player loading.
-    // Result is cached per file (IndexedDB), so the next time it is instant.
-    useEffect(() => {
-        if (!isVideo) return;
-        let cancelled = false;
-        subtitleCacheRef.current.clear();
-        setIsExtractingSubs(true);
-
-        const apply = (entries: CachedSubs['tracks']) => {
-            subtitleCacheRef.current.clear();
-            entries.forEach(({ option, cues }) => subtitleCacheRef.current.set(option.id, cues));
-            const options = entries.map(e => e.option);
-            setSubtitleTracks(options);
-            if (AUTO_ENABLE_SUBTITLES && options.length > 0) setSelectedSubtitle(options[0].id);
-        };
-
-        (async () => {
-            try {
-                const cacheKey = String(file.id);
-                const cached = await readSubCache(cacheKey);
-                if (cancelled) return;
-                if (cached) { apply(cached.tracks); return; }
-
-                const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
-                const extracted: any[] = await extractSubtitles(authorizedStreamUrl, { verbose: false, concurrency: 5 });
-                if (cancelled) return;
-
-                const entries: CachedSubs['tracks'] = [];
-                extracted.forEach((t: any, i: number) => {
-                    if (!t?.output?.subtitle) return; // image-based tracks (PGS/VobSub) can't be rendered
-                    const cues = parseSubtitles(new TextDecoder().decode(t.output.subtitle));
-                    if (cues.length === 0) return;
-                    entries.push({
-                        cues,
-                        option: {
-                            id: t.metadata?.trackNumber ?? i,
-                            label: describeTrack({ name: t.metadata?.trackName, language: t.metadata?.language }, i),
-                            language: t.metadata?.language,
-                            trackNumber: t.metadata?.trackNumber,
-                        },
-                    });
-                });
-
-                apply(entries);
-                writeSubCache(cacheKey, { tracks: entries });
-            } catch (err) {
-                console.error('Subtitle scan failed:', err);
-            } finally {
-                if (!cancelled) setIsExtractingSubs(false);
-            }
-        })();
-
-        return () => { cancelled = true; };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isVideo, file.id]);
-
-    // Create / destroy the MediaFox player and register the subtitle overlay plugin
+    // Inizializzazione MediaFox
     useEffect(() => {
         if (!isVideo || !canvasRef.current) return;
 
@@ -392,8 +203,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
         setIsLoading(true);
         setError(null);
-        setSubtitleTracks([]);
-        setSelectedSubtitle(null);
         advTime.current = 0;
 
         (async () => {
@@ -403,46 +212,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
                 player = new MediaFox({ renderTarget: canvasRef.current, volume: isMuted ? 0 : volume });
                 playerRef.current = player;
-
-                // ---- Subtitle overlay plugin ----
-                const subtitlePlugin = {
-                    name: 'subtitles',
-                    install(ctx: any) {
-                        ctx.setPluginState({ subtitles: [] as SubtitleCue[] });
-                    },
-                    hooks: {
-                        render: {
-                            onOverlay: {
-                                zIndex: 100,
-                                render(ctx: CanvasRenderingContext2D, time: number, { width, height }: { width: number; height: number }) {
-                                    if (selectedSubtitleRef.current == null) return;
-                                    const cues = subtitleCuesRef.current;
-                                    const active = cues.filter((c: SubtitleCue) => time >= c.start && time <= c.end);
-                                    if (active.length === 0) return;
-
-                                    const lines = active.flatMap((c: SubtitleCue) => c.text.split('\n'));
-                                    const fontSize = Math.max(16, Math.floor(height * 0.045));
-                                    ctx.font = `bold ${fontSize}px sans-serif`;
-                                    ctx.textAlign = 'center';
-                                    ctx.textBaseline = 'bottom';
-                                    ctx.fillStyle = 'white';
-                                    ctx.strokeStyle = 'black';
-                                    ctx.lineWidth = Math.max(2, fontSize / 10);
-
-                                    const lineHeight = fontSize * 1.3;
-                                    const baseY = height - height * 0.08;
-                                    lines.forEach((line, i) => {
-                                        const y = baseY - (lines.length - 1 - i) * lineHeight;
-                                        ctx.strokeText(line, width / 2, y);
-                                        ctx.fillText(line, width / 2, y);
-                                    });
-                                },
-                            },
-                        },
-                    },
-                };
-
-                await player.use(subtitlePlugin);
 
                 let wasPlaying = false;
                 const unsubscribe = player.subscribe((s: any) => {
@@ -465,7 +234,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 await player.load(authorizedStreamUrl);
                 if (cancelled) return;
 
-                // Audio tracks
                 const tracks: any[] = player.getAudioTracks?.() ?? [];
                 setAudioTracks(tracks.map((t, i) => ({ id: t.id, label: describeTrack(t, i) })));
                 setSelectedAudio(tracks[0]?.id ?? null);
@@ -491,14 +259,12 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isVideo, file.id]);
 
-    // Fullscreen sync
     useEffect(() => {
         const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
         document.addEventListener('fullscreenchange', onFsChange);
         return () => document.removeEventListener('fullscreenchange', onFsChange);
     }, []);
 
-    // Keyboard controls
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (error) return;
@@ -524,7 +290,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         hideControlsTimeout.current = setTimeout(() => { if (isPlaying && !isMinimized) setShowControls(false); }, 3000);
     };
 
-    // Audio autoplay
     useEffect(() => {
         if (!isVideo && audioRef.current && !error) audioRef.current.play().catch(() => { });
     }, [error, file.id, isVideo]);
@@ -555,13 +320,13 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         <h3 className="text-xl font-bold text-white mb-2">Playback Not Supported</h3>
                         <p className="text-dark-300 mb-6">{error}</p>
                         <div className="flex flex-col gap-3">
-                            <a href={vlcUrl} className="btn-primary flex items-center justify-center gap-2"><ExternalLink className="w-4 h-4" />Open in VLC</a>
-                            <div className="flex gap-3">
-                                <Button onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(externalUrl); }} className="flex-1 btn-secondary flex items-center justify-center gap-2"><Copy className="w-4 h-4" />Copy URL</Button>
-                                <a href={externalUrl} download={file.file_name} className="flex-1 btn-secondary flex items-center justify-center gap-2" onClick={(e) => e.stopPropagation()}><Download className="w-4 h-4" />Download</a>
+                            <a href={vlcUrl} className="btn-primary flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-500"><MonitorPlay className="w-5 h-5" />Apri in VLC</a>
+                            <a href={externalUrl} className="btn-secondary flex items-center justify-center gap-2"><ExternalLink className="w-4 h-4" />Apri URL Diretto</a>
+                            <div className="flex gap-3 mt-2">
+                                <Button onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(externalUrl); }} className="flex-1 btn-secondary flex items-center justify-center gap-2"><Copy className="w-4 h-4" />Copia URL</Button>
                             </div>
                         </div>
-                        <button onClick={onClose} className="mt-6 text-dark-400 hover:text-white text-sm transition-colors">Close</button>
+                        <button onClick={onClose} className="mt-6 text-dark-400 hover:text-white text-sm transition-colors">Chiudi</button>
                     </div>
                 ) : (
                     <>
@@ -585,12 +350,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         {MediaElement}
                         {isLoading && !error && !isMinimized && (
                             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20"><div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-500"></div></div>
-                        )}
-                        {isExtractingSubs && !isMinimized && (
-                            <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-40 bg-dark-800/90 backdrop-blur px-4 py-2 rounded-lg text-sm text-white flex items-center gap-2">
-                                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-500"></div>
-                                Ricerca sottotitoli…
-                            </div>
                         )}
                     </>
                 )}
@@ -630,9 +389,22 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                             {((extendedFile?.last_pos || 0) > 0) && currentTime < 5 && <p className="text-xs text-primary-400">Resumed from {formatDuration(extendedFile?.last_pos || 0)}</p>}
                         </div>
                         <div className="flex items-center gap-2">
+
+                            {/* Pulsante VLC in primo piano */}
+                            {isVideo && (
+                                <a
+                                    href={vlcUrl}
+                                    className="flex items-center gap-2 px-3 py-1.5 bg-primary-600 hover:bg-primary-500 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-primary-500/20"
+                                    title="Apri in VLC (Consigliato per MKV con sottotitoli)"
+                                >
+                                    <MonitorPlay className="w-4 h-4" />
+                                    <span className="hidden sm:inline">Apri in VLC</span>
+                                </a>
+                            )}
+
                             {/* Audio menu */}
                             {isVideo && (
-                                <div className="relative">
+                                <div className="relative ml-2">
                                     <button onClick={() => setShowAudioMenu((v) => !v)} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors flex items-center gap-1.5" title="Audio tracks"><Languages className="w-5 h-5" /></button>
                                     {showAudioMenu && (
                                         <div className="absolute right-0 top-full mt-2 min-w-[230px] bg-dark-800/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl p-1 z-40">
@@ -647,27 +419,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                     )}
                                 </div>
                             )}
-                            {/* Subtitle menu */}
-                            {isVideo && (
-                                <div className="relative">
-                                    <button onClick={() => setShowSubtitleMenu((v) => !v)} className="relative p-2 text-white hover:bg-white/20 rounded-full transition-colors flex items-center gap-1.5" title="Subtitles"><Subtitles className="w-5 h-5" />{isExtractingSubs ? <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 animate-pulse" /> : subtitleTracks.length > 0 && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-primary-400" />}</button>
-                                    {showSubtitleMenu && (
-                                        <div className="absolute right-0 top-full mt-2 min-w-[230px] bg-dark-800/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl p-1 z-40">
-                                            <p className="px-3 py-2 text-xs text-dark-400">Sottotitoli</p>
-                                            <button onClick={() => { setSelectedSubtitle(null); setShowSubtitleMenu(false); }} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === null ? 'text-primary-300' : 'text-white'}`}><span>Disattivati</span>{selectedSubtitle === null && <Check className="w-4 h-4 shrink-0" />}</button>
-                                            {subtitleTracks.length === 0 && (
-                                                <p className="px-3 py-2 text-xs text-dark-400">{isExtractingSubs ? 'Ricerca sottotitoli in corso…' : 'Nessun sottotitolo incorporato trovato'}</p>
-                                            )}
-                                            {subtitleTracks.map((track) => (
-                                                <button key={String(track.id)} onClick={() => selectSubtitleTrack(track.id)} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === track.id ? 'text-primary-300' : 'text-white'}`}>
-                                                    <span className="truncate">{track.label}</span>{selectedSubtitle === track.id && <Check className="w-4 h-4 shrink-0" />}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                            <button onClick={() => setMinimized(true)} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors" title="Minimize"><ChevronDown className="w-6 h-6" /></button>
+
+                            <button onClick={() => setMinimized(true)} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors ml-2" title="Minimize"><ChevronDown className="w-6 h-6" /></button>
                             <button onClick={onClose} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors"><X className="w-6 h-6" /></button>
                         </div>
                     </div>

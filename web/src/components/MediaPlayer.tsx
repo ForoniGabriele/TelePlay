@@ -1,10 +1,8 @@
 /**
  * MediaPlayer - full screen video/audio player
  * Video: uses ONLY the advanced MediaFox player (canvas + Web Audio).
- *   Subtitles are rendered via a MediaFox overlay plugin (onOverlay).
- *   NOTE: MediaFox does NOT extract embedded MKV subtitles automatically.
- *   You must provide subtitle cues (e.g. from an external .srt/.vtt file,
- *   or extracted via @cryguy/mkv-subtitle-extractor) to see them.
+ *   Subtitles are extracted from the MKV via @cryguy/mkv-subtitle-extractor
+ *   and rendered via a MediaFox overlay plugin (onOverlay).
  * Audio: keeps the custom UI.
  */
 import { useRef, useEffect, useState, useCallback } from 'react';
@@ -22,6 +20,8 @@ interface SubtitleCue {
 interface SubtitleTrackOption {
     id: number | string;
     label: string;
+    language?: string;
+    trackNumber?: number;
 }
 
 // Minimal SRT/VTT parser: returns an array of cues.
@@ -99,6 +99,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrackOption[]>([]);
     const [selectedSubtitle, setSelectedSubtitle] = useState<number | string | null>(null);
     const [showSubtitleMenu, setShowSubtitleMenu] = useState(false);
+    const [isExtractingSubs, setIsExtractingSubs] = useState(false);
     const subtitleCuesRef = useRef<SubtitleCue[]>([]);
     const selectedSubtitleRef = useRef<number | string | null>(null);
 
@@ -236,33 +237,60 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     };
 
     const selectSubtitleTrack = (id: number | string) => {
-        // The overlay plugin reads selectedSubtitleRef; no player API call is needed
-        // because MediaFox's selectSubtitleTrack only enables a track internally,
-        // it does NOT render cues on the canvas.
         setSelectedSubtitle(id);
         setShowSubtitleMenu(false);
     };
 
-    // Load subtitle cues for the selected track.
-    // This is where you plug in your subtitle source:
-    // - If you have an external .srt/.vtt URL, fetch it here.
-    // - If subtitles are embedded in the MKV, use mkv-subtitle-extractor first.
+    // Extract subtitles from the MKV when a subtitle track is selected
     useEffect(() => {
-        if (!selectedSubtitle || !isVideo) {
+        if (!selectedSubtitle || !isVideo || !authorizedStreamUrl) {
             subtitleCuesRef.current = [];
             return;
         }
-        // PLACEHOLDER: replace with real subtitle loading.
-        // Example with an external URL:
-        // fetch('/subtitles/movie.srt').then(r => r.text()).then(raw => {
-        //     subtitleCuesRef.current = parseSubtitles(raw);
-        // });
-        //
-        // For now, show a demo cue so you can verify the overlay works.
-        subtitleCuesRef.current = [
-            { start: 0, end: 99999, text: 'Sottotitoli demo attivi (sostituisci con il caricamento reale)' },
-        ];
-    }, [selectedSubtitle, isVideo]);
+
+        let cancelled = false;
+        setIsExtractingSubs(true);
+
+        (async () => {
+            try {
+                const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
+                if (cancelled) return;
+
+                // Find the track metadata for the selected subtitle
+                const trackMeta = subtitleTracks.find(t => t.id === selectedSubtitle);
+                const trackNumber = trackMeta?.trackNumber;
+
+                const tracks = await extractSubtitles(authorizedStreamUrl, {
+                    verbose: true,
+                    // If your stream requires a token header, uncomment:
+                    // headers: { 'Authorization': `Bearer ${token}` },
+                });
+
+                if (cancelled) return;
+
+                // Pick the matching track (by trackNumber if available, otherwise first)
+                const track = trackNumber != null
+                    ? tracks.find((t: any) => t.metadata?.trackNumber === trackNumber)
+                    : tracks[0];
+
+                if (track && track.output?.subtitle) {
+                    const raw = new TextDecoder().decode(track.output.subtitle);
+                    subtitleCuesRef.current = parseSubtitles(raw);
+                    console.log(`Sottotitoli caricati: ${subtitleCuesRef.current.length} cue (tipo: ${track.type})`);
+                } else {
+                    console.warn('Nessuna traccia sottotitoli trovata nell\'MKV');
+                    subtitleCuesRef.current = [];
+                }
+            } catch (err) {
+                console.error('Errore estrazione sottotitoli:', err);
+                subtitleCuesRef.current = [];
+            } finally {
+                if (!cancelled) setIsExtractingSubs(false);
+            }
+        })();
+
+        return () => { cancelled = true; };
+    }, [selectedSubtitle, isVideo, authorizedStreamUrl, subtitleTracks]);
 
     // Create / destroy the MediaFox player and register the subtitle overlay plugin
     useEffect(() => {
@@ -286,7 +314,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
                 // ---- Subtitle overlay plugin ----
                 // MediaFox renders on canvas, so subtitles must be drawn manually
-                // via the onOverlay render hook [citation:1].
+                // via the onOverlay render hook [citation:2].
                 const subtitlePlugin = {
                     name: 'subtitles',
                     install(ctx: any) {
@@ -297,7 +325,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                             onOverlay: {
                                 zIndex: 100,
                                 render(ctx: CanvasRenderingContext2D, time: number, { width, height }: { width: number; height: number }) {
-                                    // Only draw if a subtitle track is selected
                                     if (selectedSubtitleRef.current == null) return;
                                     const cues = subtitleCuesRef.current;
                                     const cue = cues.find((c: SubtitleCue) => time >= c.start && time <= c.end);
@@ -348,15 +375,14 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 await player.load(authorizedStreamUrl);
                 if (cancelled) return;
 
-                // Audio tracks (as before)
+                // Audio tracks
                 const tracks: any[] = player.getAudioTracks?.() ?? [];
                 setAudioTracks(tracks.map((t, i) => ({ id: t.id, label: describeTrack(t, i) })));
                 setSelectedAudio(tracks[0]?.id ?? null);
 
-                // Subtitle tracks: for now we expose a single "Italiano" option.
-                // Replace this with real track metadata from your extraction logic.
-                setSubtitleTracks([{ id: 'it', label: 'Italiano' }]);
-                setSelectedSubtitle('it');
+                // Subtitle tracks: we'll populate them after extraction.
+                // For now, leave empty; the extraction effect will fill the menu.
+                // (In a more refined version you could pre-scan the MKV once to list tracks.)
 
                 const start = extendedFile?.last_pos ?? 0;
                 if (start > 1) await player.seek(start);
@@ -483,6 +509,12 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         {isLoading && !error && !isMinimized && (
                             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20"><div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-500"></div></div>
                         )}
+                        {isExtractingSubs && !isMinimized && (
+                            <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-40 bg-dark-800/90 backdrop-blur px-4 py-2 rounded-lg text-sm text-white flex items-center gap-2">
+                                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-500"></div>
+                                Estrazione sottotitoli...
+                            </div>
+                        )}
                     </>
                 )}
             </div>
@@ -546,11 +578,33 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                         <div className="absolute right-0 top-full mt-2 min-w-[230px] bg-dark-800/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl p-1 z-40">
                                             <p className="px-3 py-2 text-xs text-dark-400">Sottotitoli</p>
                                             <button onClick={() => { setSelectedSubtitle(null); setShowSubtitleMenu(false); }} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === null ? 'text-primary-300' : 'text-white'}`}><span>Disattivati</span>{selectedSubtitle === null && <Check className="w-4 h-4 shrink-0" />}</button>
+                                            {subtitleTracks.length === 0 && (
+                                                <p className="px-3 py-2 text-xs text-dark-400">Seleziona per estrarre i sottotitoli dall'MKV</p>
+                                            )}
                                             {subtitleTracks.map((track) => (
                                                 <button key={String(track.id)} onClick={() => selectSubtitleTrack(track.id)} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === track.id ? 'text-primary-300' : 'text-white'}`}>
                                                     <span className="truncate">{track.label}</span>{selectedSubtitle === track.id && <Check className="w-4 h-4 shrink-0" />}
                                                 </button>
                                             ))}
+                                            {subtitleTracks.length === 0 && (
+                                                <button onClick={async () => {
+                                                    // Quick scan: extract and list tracks
+                                                    try {
+                                                        const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
+                                                        const tracks = await extractSubtitles(authorizedStreamUrl, { verbose: false });
+                                                        setSubtitleTracks(tracks.map((t: any, i: number) => ({
+                                                            id: t.metadata?.trackNumber ?? i,
+                                                            label: describeTrack({ name: t.metadata?.trackName, language: t.metadata?.language }, i),
+                                                            language: t.metadata?.language,
+                                                            trackNumber: t.metadata?.trackNumber,
+                                                        })));
+                                                    } catch (err) {
+                                                        console.error('Scan sottotitoli fallito:', err);
+                                                    }
+                                                }} className="w-full px-3 py-2 rounded-lg text-sm text-left text-primary-400 hover:bg-white/10 transition-colors">
+                                                    Scansiona tracce sottotitoli
+                                                </button>
+                                            )}
                                         </div>
                                     )}
                                 </div>

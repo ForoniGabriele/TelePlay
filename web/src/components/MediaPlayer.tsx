@@ -262,8 +262,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
                 const tracks = await extractSubtitles(authorizedStreamUrl, {
                     verbose: true,
-                    // If your stream requires a token header, uncomment:
-                    // headers: { 'Authorization': `Bearer ${token}` },
                 });
 
                 if (cancelled) return;
@@ -313,8 +311,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 playerRef.current = player;
 
                 // ---- Subtitle overlay plugin ----
-                // MediaFox renders on canvas, so subtitles must be drawn manually
-                // via the onOverlay render hook [citation:2].
                 const subtitlePlugin = {
                     name: 'subtitles',
                     install(ctx: any) {
@@ -375,14 +371,31 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 await player.load(authorizedStreamUrl);
                 if (cancelled) return;
 
+                // --- AGGIUNTA: Auto-scansione e attivazione automatica dei sottotitoli ---
+                try {
+                    const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
+                    const tracksExtracted = await extractSubtitles(authorizedStreamUrl, { verbose: false });
+
+                    if (tracksExtracted && tracksExtracted.length > 0) {
+                        const mappedTracks = tracksExtracted.map((t: any, i: number) => ({
+                            id: t.metadata?.trackNumber ?? i,
+                            label: describeTrack({ name: t.metadata?.trackName, language: t.metadata?.language }, i),
+                            language: t.metadata?.language,
+                            trackNumber: t.metadata?.trackNumber,
+                        }));
+
+                        setSubtitleTracks(mappedTracks);
+                        setSelectedSubtitle(mappedTracks[0].id); // Seleziona automaticamente la prima traccia
+                    }
+                } catch (err) {
+                    console.error('Scansione automatica sottotitoli fallita:', err);
+                }
+                // ------------------------------------------------------------------------
+
                 // Audio tracks
                 const tracks: any[] = player.getAudioTracks?.() ?? [];
                 setAudioTracks(tracks.map((t, i) => ({ id: t.id, label: describeTrack(t, i) })));
                 setSelectedAudio(tracks[0]?.id ?? null);
-
-                // Subtitle tracks: we'll populate them after extraction.
-                // For now, leave empty; the extraction effect will fill the menu.
-                // (In a more refined version you could pre-scan the MKV once to list tracks.)
 
                 const start = extendedFile?.last_pos ?? 0;
                 if (start > 1) await player.seek(start);
@@ -579,32 +592,13 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                             <p className="px-3 py-2 text-xs text-dark-400">Sottotitoli</p>
                                             <button onClick={() => { setSelectedSubtitle(null); setShowSubtitleMenu(false); }} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === null ? 'text-primary-300' : 'text-white'}`}><span>Disattivati</span>{selectedSubtitle === null && <Check className="w-4 h-4 shrink-0" />}</button>
                                             {subtitleTracks.length === 0 && (
-                                                <p className="px-3 py-2 text-xs text-dark-400">Seleziona per estrarre i sottotitoli dall'MKV</p>
+                                                <p className="px-3 py-2 text-xs text-dark-400">Nessuna traccia trovata automaticamente</p>
                                             )}
                                             {subtitleTracks.map((track) => (
                                                 <button key={String(track.id)} onClick={() => selectSubtitleTrack(track.id)} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === track.id ? 'text-primary-300' : 'text-white'}`}>
                                                     <span className="truncate">{track.label}</span>{selectedSubtitle === track.id && <Check className="w-4 h-4 shrink-0" />}
                                                 </button>
                                             ))}
-                                            {subtitleTracks.length === 0 && (
-                                                <button onClick={async () => {
-                                                    // Quick scan: extract and list tracks
-                                                    try {
-                                                        const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
-                                                        const tracks = await extractSubtitles(authorizedStreamUrl, { verbose: false });
-                                                        setSubtitleTracks(tracks.map((t: any, i: number) => ({
-                                                            id: t.metadata?.trackNumber ?? i,
-                                                            label: describeTrack({ name: t.metadata?.trackName, language: t.metadata?.language }, i),
-                                                            language: t.metadata?.language,
-                                                            trackNumber: t.metadata?.trackNumber,
-                                                        })));
-                                                    } catch (err) {
-                                                        console.error('Scan sottotitoli fallito:', err);
-                                                    }
-                                                }} className="w-full px-3 py-2 rounded-lg text-sm text-left text-primary-400 hover:bg-white/10 transition-colors">
-                                                    Scansiona tracce sottotitoli
-                                                </button>
-                                            )}
                                         </div>
                                     )}
                                 </div>

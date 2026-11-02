@@ -86,6 +86,36 @@ function parseSubtitles(raw: string): SubtitleCue[] {
     return /\[Events\]/i.test(raw) || /^Dialogue:/m.test(raw) ? parseAss(raw) : parseSrtVtt(raw);
 }
 
+// ---- Subtitle cache (IndexedDB): reopening a file shows subtitles instantly ----
+interface CachedSubs {
+    tracks: Array<{ option: SubtitleTrackOption; cues: SubtitleCue[] }>;
+}
+
+const openSubDb = () => new Promise<IDBDatabase>((resolve, reject) => {
+    const req = indexedDB.open('teleplay-subtitles', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('subs');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+});
+
+async function readSubCache(key: string): Promise<CachedSubs | null> {
+    try {
+        const db = await openSubDb();
+        return await new Promise((resolve) => {
+            const req = db.transaction('subs').objectStore('subs').get(key);
+            req.onsuccess = () => resolve((req.result as CachedSubs) ?? null);
+            req.onerror = () => resolve(null);
+        });
+    } catch { return null; }
+}
+
+async function writeSubCache(key: string, value: CachedSubs) {
+    try {
+        const db = await openSubDb();
+        db.transaction('subs', 'readwrite').objectStore('subs').put(value, key);
+    } catch { /* cache is best-effort */ }
+}
+
 // Builds a readable name for an audio/subtitle track
 function describeTrack(track: any, index: number): string {
     const name = track?.name || track?.label || track?.title;
@@ -141,7 +171,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [isExtractingSubs, setIsExtractingSubs] = useState(false);
     const subtitleCuesRef = useRef<SubtitleCue[]>([]);
     const subtitleCacheRef = useRef<Map<number | string, SubtitleCue[]>>(new Map());
-    const [playerReady, setPlayerReady] = useState(false);
     const selectedSubtitleRef = useRef<number | string | null>(null);
 
     // Keep the ref in sync so the overlay plugin can read it
@@ -297,37 +326,51 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         subtitleCuesRef.current = selectedSubtitle == null ? [] : (subtitleCacheRef.current.get(selectedSubtitle) ?? []);
     }, [selectedSubtitle, subtitleTracks]);
 
-    // Scan the embedded subtitle tracks in the background, once the video is already playing.
-    // Every text track is parsed once and cached, so picking one from the menu is instant.
+    // Look for embedded subtitle tracks right away, in parallel with the player loading.
+    // Result is cached per file (IndexedDB), so the next time it is instant.
     useEffect(() => {
-        if (!isVideo || !playerReady) return;
+        if (!isVideo) return;
         let cancelled = false;
         subtitleCacheRef.current.clear();
         setIsExtractingSubs(true);
 
+        const apply = (entries: CachedSubs['tracks']) => {
+            subtitleCacheRef.current.clear();
+            entries.forEach(({ option, cues }) => subtitleCacheRef.current.set(option.id, cues));
+            const options = entries.map(e => e.option);
+            setSubtitleTracks(options);
+            if (AUTO_ENABLE_SUBTITLES && options.length > 0) setSelectedSubtitle(options[0].id);
+        };
+
         (async () => {
             try {
+                const cacheKey = String(file.id);
+                const cached = await readSubCache(cacheKey);
+                if (cancelled) return;
+                if (cached) { apply(cached.tracks); return; }
+
                 const { extractSubtitles } = await import('@cryguy/mkv-subtitle-extractor');
                 const extracted: any[] = await extractSubtitles(authorizedStreamUrl, { verbose: false });
                 if (cancelled) return;
 
-                const options: SubtitleTrackOption[] = [];
+                const entries: CachedSubs['tracks'] = [];
                 extracted.forEach((t: any, i: number) => {
                     if (!t?.output?.subtitle) return; // image-based tracks (PGS/VobSub) can't be rendered
                     const cues = parseSubtitles(new TextDecoder().decode(t.output.subtitle));
                     if (cues.length === 0) return;
-                    const id = t.metadata?.trackNumber ?? i;
-                    subtitleCacheRef.current.set(id, cues);
-                    options.push({
-                        id,
-                        label: describeTrack({ name: t.metadata?.trackName, language: t.metadata?.language }, i),
-                        language: t.metadata?.language,
-                        trackNumber: t.metadata?.trackNumber,
+                    entries.push({
+                        cues,
+                        option: {
+                            id: t.metadata?.trackNumber ?? i,
+                            label: describeTrack({ name: t.metadata?.trackName, language: t.metadata?.language }, i),
+                            language: t.metadata?.language,
+                            trackNumber: t.metadata?.trackNumber,
+                        },
                     });
                 });
 
-                setSubtitleTracks(options);
-                if (AUTO_ENABLE_SUBTITLES && options.length > 0) setSelectedSubtitle(options[0].id);
+                apply(entries);
+                writeSubCache(cacheKey, { tracks: entries });
             } catch (err) {
                 console.error('Subtitle scan failed:', err);
             } finally {
@@ -337,7 +380,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
         return () => { cancelled = true; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isVideo, file.id, playerReady]);
+    }, [isVideo, file.id]);
 
     // Create / destroy the MediaFox player and register the subtitle overlay plugin
     useEffect(() => {
@@ -349,7 +392,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
         setIsLoading(true);
         setError(null);
-        setPlayerReady(false);
         setSubtitleTracks([]);
         setSelectedSubtitle(null);
         advTime.current = 0;
@@ -433,7 +475,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 if (cancelled) return;
 
                 setIsLoading(false);
-                setPlayerReady(true); // video is up: now the subtitle scan can start
                 await player.play();
             } catch (err) {
                 console.error('Advanced player failed:', err);
@@ -609,7 +650,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                             {/* Subtitle menu */}
                             {isVideo && (
                                 <div className="relative">
-                                    <button onClick={() => setShowSubtitleMenu((v) => !v)} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors flex items-center gap-1.5" title="Subtitles"><Subtitles className="w-5 h-5" /></button>
+                                    <button onClick={() => setShowSubtitleMenu((v) => !v)} className="relative p-2 text-white hover:bg-white/20 rounded-full transition-colors flex items-center gap-1.5" title="Subtitles"><Subtitles className="w-5 h-5" />{isExtractingSubs ? <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 animate-pulse" /> : subtitleTracks.length > 0 && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-primary-400" />}</button>
                                     {showSubtitleMenu && (
                                         <div className="absolute right-0 top-full mt-2 min-w-[230px] bg-dark-800/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl p-1 z-40">
                                             <p className="px-3 py-2 text-xs text-dark-400">Sottotitoli</p>

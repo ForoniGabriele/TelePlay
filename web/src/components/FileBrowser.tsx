@@ -149,6 +149,14 @@ export default function FileBrowser() {
     useEffect(() => {
         if (filesList && activeSection === 'files') {
             setAllFiles(prev => {
+                // Se React Query ha appena ricaricato la prima pagina 
+                // (es. dopo uno spostamento o una cancellazione), 
+                // resettiamo lo stato accumulato per evitare file "fantasma"
+                if (filesList.page === 1) {
+                    return filesList.files;
+                }
+
+                // Altrimenti (scroll infinito), aggiungiamo i nuovi file in coda
                 const existingIds = new Set(prev.map(f => f.id));
                 const newFiles = filesList.files.filter(f => !existingIds.has(f.id));
                 return [...prev, ...newFiles];

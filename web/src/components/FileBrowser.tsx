@@ -105,6 +105,17 @@ export default function FileBrowser() {
     const [hasMore, setHasMore] = useState(true);
     const [allFiles, setAllFiles] = useState<TelegramFile[]>([]);
 
+    // Reset pagination when filters change (done during render, not in an effect,
+    // so `page` is already 1 when useFiles runs and cached data isn't wiped afterwards)
+    const resetKey = `${currentFolderId ?? 'root'}|${fileTypeFilter}|${searchQuery}|${activeSection}`;
+    const [prevResetKey, setPrevResetKey] = useState(resetKey);
+    if (prevResetKey !== resetKey) {
+        setPrevResetKey(resetKey);
+        setPage(1);
+        setAllFiles([]);
+        setHasMore(true);
+    }
+
     // Sorting state
     const [sortBy, setSortBy] = useState<'default' | 'name_asc' | 'name_desc'>('name_asc');
 
@@ -569,13 +580,6 @@ export default function FileBrowser() {
             return () => container.removeEventListener('scroll', handleScroll);
         }
     }, [isLoading, hasMore, activeSection]);
-
-    // Reset pagination when filters change
-    useEffect(() => {
-        setPage(1);
-        setAllFiles([]);
-        setHasMore(true);
-    }, [currentFolderId, fileTypeFilter, searchQuery, activeSection]);
 
     return (
         <div className="flex h-screen bg-dark-950 text-white selection:bg-primary-500/30 overflow-hidden">

@@ -1,7 +1,7 @@
 /**
  * MoveFileModal - modal for selecting a destination folder
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { X, Folder as FolderIcon, ChevronRight, Home } from 'lucide-react';
 import { useFolderTree, TelegramFile, Folder, useMoveFiles, useMoveFolders } from '../lib/api';
 import { useAppStore } from '../lib/store';
@@ -19,6 +19,21 @@ export default function MoveFileModal({ items, onClose }: MoveFileModalProps) {
     const { addToast, clearSelection } = useAppStore();
 
     const isPending = isFilesPending || isFoldersPending;
+
+    // Folders that can't be a destination: the ones being moved and all their descendants
+    const excludedIds = useMemo(() => {
+        const moving = new Set(items.folders.map(f => f.id));
+        const excluded = new Set<number>();
+        const walk = (nodes: Folder[] | undefined, inside: boolean) => {
+            nodes?.forEach(node => {
+                const isExcluded = inside || moving.has(node.id);
+                if (isExcluded) excluded.add(node.id);
+                walk(node.children, isExcluded);
+            });
+        };
+        walk(folderTree, false);
+        return excluded;
+    }, [folderTree, items.folders]);
     const totalItems = items.files.length + items.folders.length;
 
     const handleMove = async () => {
@@ -30,8 +45,8 @@ export default function MoveFileModal({ items, onClose }: MoveFileModalProps) {
             if (items.folders.length > 0) {
                 // Prevent moving folder into itself
                 const folderIds = items.folders.map(f => f.id);
-                if (selectedId && folderIds.includes(selectedId)) {
-                    addToast('Cannot move a folder into itself', 'error');
+                if (selectedId !== null && (folderIds.includes(selectedId) || excludedIds.has(selectedId))) {
+                    addToast('Cannot move a folder into itself or one of its subfolders', 'error');
                     return;
                 }
                 promises.push(moveFolders({ ids: folderIds, folderId: selectedId }));
@@ -80,6 +95,7 @@ export default function MoveFileModal({ items, onClose }: MoveFileModalProps) {
                                 folder={folder}
                                 selectedId={selectedId}
                                 onSelect={setSelectedId}
+                                excludedIds={excludedIds}
                                 depth={0}
                             />
                         ))
@@ -113,13 +129,18 @@ export default function MoveFileModal({ items, onClose }: MoveFileModalProps) {
     );
 }
 
-function FolderTreeItem({ folder, selectedId, onSelect, depth }: {
+function FolderTreeItem({ folder, selectedId, onSelect, excludedIds, depth }: {
     folder: Folder;
     selectedId: number | null;
     onSelect: (id: number) => void;
+    excludedIds: Set<number>;
     depth: number;
 }) {
     const [expanded, setExpanded] = useState(false);
+
+    // Hide folders being moved (and their subfolders): they can't be a destination
+    if (excludedIds.has(folder.id)) return null;
+
     const hasChildren = folder.children && folder.children.length > 0;
 
     return (
@@ -150,6 +171,7 @@ function FolderTreeItem({ folder, selectedId, onSelect, depth }: {
                     folder={child}
                     selectedId={selectedId}
                     onSelect={onSelect}
+                    excludedIds={excludedIds}
                     depth={depth + 1}
                 />
             ))}

@@ -4,7 +4,7 @@ import { TelegramFile, Folder, api } from '../lib/api';
 import { Play, Download, Link, Edit, FolderInput, Trash2, Globe, ShieldOff, HardDriveDownload, Image as ImageIcon } from 'lucide-react';
 
 export default function GlobalContextMenu() {
-    const { activeContextMenu, setActiveContextMenu, setPreviewFile, setMoveItems, setMoveFiles, setDeleteConfirm, setRenameFile, setRenameFolder, setCoverFolder, selectedFileIds, selectedFiles } = useAppStore();
+    const { activeContextMenu, setActiveContextMenu, setPreviewFile, setMoveItems, setMoveFiles, setDeleteConfirm, setRenameFile, setRenameFolder, setCoverFolder, selectedFileIds, selectedFiles, selectedFolderIds } = useAppStore();
     const menuRef = useRef<HTMLDivElement>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -30,7 +30,7 @@ export default function GlobalContextMenu() {
     // Adjust position to keep within viewport
     const getMenuPosition = () => {
         const menuWidth = 220;
-        const menuHeight = 350; 
+        const menuHeight = 350;
         const padding = 10;
 
         let posX = x;
@@ -47,6 +47,16 @@ export default function GlobalContextMenu() {
     };
 
     const position = getMenuPosition();
+
+    // --- Folder Actions ---
+    const handleMoveFolder = (folder: Folder) => {
+        // If the folder is part of a multi-selection of folders, move them all together
+        const folders: Folder[] =
+            selectedFolderIds.size > 1 && selectedFolderIds.has(folder.id)
+                ? Array.from(selectedFolderIds).map(id => ({ id } as Folder))
+                : [folder];
+        setMoveItems({ files: [], folders });
+    };
 
     const handleAction = (action: () => void) => {
         action();
@@ -166,7 +176,7 @@ export default function GlobalContextMenu() {
                                     <FolderInput className="w-4 h-4" />
                                     Move ({selectedFileIds.size}) Items
                                 </button>
-                                <button className="context-menu-item w-full text-left text-red-400 hover:bg-red-500/10" onClick={() => handleAction(() => setDeleteConfirm({ type: 'file', items: Array.from(selectedFileIds).map(id => ({ id } as any)) }))}> 
+                                <button className="context-menu-item w-full text-left text-red-400 hover:bg-red-500/10" onClick={() => handleAction(() => setDeleteConfirm({ type: 'file', items: Array.from(selectedFileIds).map(id => ({ id } as any)) }))}>
                                     <Trash2 className="w-4 h-4" />
                                     Delete ({selectedFileIds.size}) Items
                                 </button>
@@ -186,7 +196,7 @@ export default function GlobalContextMenu() {
                                     <Download className="w-4 h-4" />
                                     Download
                                 </button>
-                                
+
                                 <hr className="border-white/[0.08] my-1" />
 
                                 <button className="context-menu-item w-full text-left" onClick={async () => {
@@ -227,7 +237,7 @@ export default function GlobalContextMenu() {
                                 )}
 
                                 <hr className="border-white/[0.08] my-1" />
-                                
+
                                 <button className="context-menu-item w-full text-left" onClick={() => handleAction(() => setRenameFile(activeContextMenu.item as TelegramFile))}>
                                     <Edit className="w-4 h-4" />
                                     Rename
@@ -236,9 +246,9 @@ export default function GlobalContextMenu() {
                                     <FolderInput className="w-4 h-4" />
                                     Move to...
                                 </button>
-                                
+
                                 <hr className="border-white/[0.08] my-1" />
-                                
+
                                 <button className="context-menu-item w-full text-left text-red-400 hover:bg-red-500/10" onClick={() => handleAction(() => setDeleteConfirm({ type: 'file', items: [activeContextMenu.item] }))}>
                                     <Trash2 className="w-4 h-4" />
                                     Delete
@@ -262,6 +272,13 @@ export default function GlobalContextMenu() {
                         >
                             <Edit className="w-4 h-4" />
                             Rename
+                        </button>
+                        <button
+                            className="context-menu-item w-full text-left"
+                            onClick={() => handleAction(() => handleMoveFolder(activeContextMenu.item as Folder))}
+                        >
+                            <FolderInput className="w-4 h-4" />
+                            Move to...
                         </button>
                         <hr className="border-white/[0.08] my-1" />
                         <button

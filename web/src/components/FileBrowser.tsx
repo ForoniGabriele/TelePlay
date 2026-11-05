@@ -13,6 +13,7 @@ import MoveFileModal from './MoveFileModal';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import RenameModal from './RenameModal';
 import FolderCoverModal from './FolderCoverModal';
+import FileCoverModal from './FileCoverModal';
 import Sidebar from './Sidebar';
 import Toasts from './Toasts';
 import UploadPanel from './UploadPanel';
@@ -51,6 +52,8 @@ export default function FileBrowser() {
         setRenameFolder,
         coverFolder,
         setCoverFolder,
+        coverFile,
+        setCoverFile,
         clipboard,
         setClipboard,
         selectionBox,
@@ -932,6 +935,13 @@ export default function FileBrowser() {
                 <FolderCoverModal
                     folder={coverFolder}
                     onClose={() => setCoverFolder(null)}
+                />
+            )}
+
+            {coverFile && (
+                <FileCoverModal
+                    file={coverFile}
+                    onClose={() => setCoverFile(null)}
                 />
             )}
         </div>

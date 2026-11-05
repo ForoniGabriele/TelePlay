@@ -3,8 +3,14 @@
  */
 import { useState, useRef, DragEvent } from 'react';
 import { X, Upload, Image as ImageIcon, Trash2, Check, Film, Loader2 } from 'lucide-react';
-import { Folder, useFiles, useUploadFolderCover, useSetFolderCoverFromFile, useDeleteFolderCover } from '../lib/api';
+import { Folder, useFiles, useFolderTree, useUploadFolderCover, useSetFolderCoverFromFile, useDeleteFolderCover } from '../lib/api';
 import { useAppStore } from '../lib/store';
+
+// Flatten the folder tree into a list with depth, for the folder picker
+function flattenTree(nodes: Folder[] | undefined, depth = 0): { id: number; name: string; depth: number }[] {
+    if (!nodes) return [];
+    return nodes.flatMap(n => [{ id: n.id, name: n.name, depth }, ...flattenTree(n.children, depth + 1)]);
+}
 
 interface FolderCoverModalProps {
     folder: Folder;
@@ -23,8 +29,13 @@ export default function FolderCoverModal({ folder, onClose }: FolderCoverModalPr
     const setCoverFromFile = useSetFolderCoverFromFile();
     const deleteCover = useDeleteFolderCover();
 
-    // Fetch files in this folder so the user can easily pick one
-    const { data: folderFilesData, isLoading: filesLoading } = useFiles(folder.id, undefined, undefined, 1);
+    // Folder whose files are shown in the "Choose from Files" tab (defaults to this folder,
+    // but any folder - or the root - can be browsed to pick an image from)
+    const [browseFolderId, setBrowseFolderId] = useState<number | null>(folder.id);
+    const { data: folderTree } = useFolderTree();
+    const folderOptions = flattenTree(folderTree);
+
+    const { data: folderFilesData, isLoading: filesLoading } = useFiles(browseFolderId, undefined, undefined, 1);
     const folderFiles = folderFilesData?.files || [];
 
     // Current cover URL with token
@@ -169,7 +180,7 @@ export default function FolderCoverModal({ folder, onClose }: FolderCoverModalPr
                                 : 'text-dark-400 hover:text-white hover:bg-white/[0.04]'
                         }`}
                     >
-                        Choose from Folder Files ({folderFiles.length})
+                        Choose from Files
                     </button>
                 </div>
 
@@ -274,13 +285,27 @@ export default function FolderCoverModal({ folder, onClose }: FolderCoverModalPr
                 {/* Tab: Files in this folder */}
                 {activeTab === 'files' && (
                     <div className="space-y-4">
+                        {/* Folder picker: browse files of any folder */}
+                        <select
+                            value={browseFolderId === null ? '' : String(browseFolderId)}
+                            onChange={(e) => setBrowseFolderId(e.target.value === '' ? null : Number(e.target.value))}
+                            className="w-full px-3 py-2 rounded-lg bg-dark-900 border border-white/10 text-xs text-white focus:outline-none focus:border-primary-500/50"
+                        >
+                            <option value="">Root (No folder)</option>
+                            {folderOptions.map((f) => (
+                                <option key={f.id} value={f.id}>
+                                    {'\u00A0\u00A0'.repeat(f.depth)}{f.name}{f.id === folder.id ? ' (this folder)' : ''}
+                                </option>
+                            ))}
+                        </select>
+
                         {filesLoading ? (
                             <div className="flex items-center justify-center py-12">
                                 <Loader2 className="w-6 h-6 animate-spin text-primary-400" />
                             </div>
                         ) : folderFiles.length === 0 ? (
                             <div className="py-10 text-center text-dark-400 text-xs">
-                                No files found in this folder. You can upload an image using the "Upload Image" tab.
+                                No files found in the selected folder. Pick another folder above or upload an image using the "Upload Image" tab.
                             </div>
                         ) : (
                             <div className="max-h-60 overflow-y-auto pr-1 grid grid-cols-2 gap-2.5">

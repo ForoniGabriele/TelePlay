@@ -193,7 +193,7 @@ api.interceptors.response.use(
             console.log('[API] 429 Too Many Requests - rate limited');
             error.message = 'Too many requests. Please wait a moment and try again.';
         }
-        
+
         return Promise.reject(error);
     }
 );
@@ -323,8 +323,8 @@ export const useDeleteFiles = () => {
         },
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['files'] });
-             queryClient.invalidateQueries({ queryKey: ['folders'] }); // Files might be inside folders affecting counts
-             queryClient.invalidateQueries({ queryKey: ['storage'] });
+            queryClient.invalidateQueries({ queryKey: ['folders'] }); // Files might be inside folders affecting counts
+            queryClient.invalidateQueries({ queryKey: ['storage'] });
         },
     });
 };
@@ -347,8 +347,8 @@ export const useRecentFiles = (limit = 20) => {
     return useQuery<FileListResponse>({
         queryKey: ['files', 'recent', limit],
         queryFn: async () => {
-             const { data } = await api.get<FileListResponse>('/files/recent', { params: { limit } });
-             return data;
+            const { data } = await api.get<FileListResponse>('/files/recent', { params: { limit } });
+            return data;
         },
     });
 };
@@ -357,8 +357,8 @@ export const useContinueWatching = (limit = 20) => {
     return useQuery<FileListResponse>({
         queryKey: ['files', 'continue-watching', limit],
         queryFn: async () => {
-             const { data } = await api.get<FileListResponse>('/files/continue-watching', { params: { limit } });
-             return data;
+            const { data } = await api.get<FileListResponse>('/files/continue-watching', { params: { limit } });
+            return data;
         },
     });
 };
@@ -367,8 +367,8 @@ export const useStorageStats = () => {
     return useQuery<StorageStats>({
         queryKey: ['storage'],
         queryFn: async () => {
-             const { data } = await api.get<StorageStats>('/files/storage');
-             return data;
+            const { data } = await api.get<StorageStats>('/files/storage');
+            return data;
         },
         staleTime: 60000,
     });
@@ -471,10 +471,10 @@ export const useDeleteFolders = () => {
             await api.post('/folders/batch-delete', ids as any);
         },
         onSuccess: () => {
-             queryClient.invalidateQueries({ queryKey: ['folders'] });
-             queryClient.invalidateQueries({ queryKey: ['folderTree'] });
-             queryClient.invalidateQueries({ queryKey: ['files'] });
-             queryClient.invalidateQueries({ queryKey: ['storage'] });
+            queryClient.invalidateQueries({ queryKey: ['folders'] });
+            queryClient.invalidateQueries({ queryKey: ['folderTree'] });
+            queryClient.invalidateQueries({ queryKey: ['files'] });
+            queryClient.invalidateQueries({ queryKey: ['storage'] });
         },
     });
 };
@@ -521,6 +521,52 @@ export const useDeleteFolderCover = () => {
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['folders'] });
             queryClient.invalidateQueries({ queryKey: ['folderTree'] });
+        },
+    });
+};
+
+export const useUploadFileCover = () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: async ({ fileId, image }: { fileId: number; image: File }) => {
+            const formData = new FormData();
+            formData.append('image', image);
+            const { data } = await api.post<TelegramFile>(`/files/${fileId}/cover`, formData, {
+                headers: { 'Content-Type': 'multipart/form-data' },
+            });
+            return data;
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['files'] });
+            queryClient.invalidateQueries({ queryKey: ['file'] });
+        },
+    });
+};
+
+export const useSetFileCoverFromFile = () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: async ({ fileId, sourceFileId }: { fileId: number; sourceFileId: number }) => {
+            const { data } = await api.post<TelegramFile>(`/files/${fileId}/cover/from-file/${sourceFileId}`);
+            return data;
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['files'] });
+            queryClient.invalidateQueries({ queryKey: ['file'] });
+        },
+    });
+};
+
+export const useDeleteFileCover = () => {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: async (fileId: number) => {
+            const { data } = await api.delete<TelegramFile>(`/files/${fileId}/cover`);
+            return data;
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['files'] });
+            queryClient.invalidateQueries({ queryKey: ['file'] });
         },
     });
 };

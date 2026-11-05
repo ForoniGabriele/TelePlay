@@ -1,6 +1,7 @@
 """
 Shared business logic and database queries.
 """
+
 import re
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,9 +10,11 @@ from sqlalchemy.orm import selectinload
 
 from .models import File, WatchProgress, Folder
 
+
 def escape_like(value: str) -> str:
     """Escape special LIKE/ILIKE characters to prevent SQL injection."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 
 def sanitize_filename(name: str) -> str:
     """
@@ -19,25 +22,78 @@ def sanitize_filename(name: str) -> str:
     """
     if not name:
         return "unnamed_file"
-    
+
     # Remove null bytes and path separators
     name = name.replace("\x00", "").replace("/", "_").replace("\\", "_")
-    
+
     # Remove dangerous characters
-    name = re.sub(r'[<>:"|?*\x00-\x1f]', '_', name)
-    
+    name = re.sub(r'[<>:"|?*\x00-\x1f]', "_", name)
+
     # Remove leading/trailing dots and spaces
     name = name.strip(". ")
-    
+
     # Limit length
     if len(name) > 255:
         if "." in name:
             ext = name.rsplit(".", 1)[-1][:10]
-            name = name[:255 - len(ext) - 1] + "." + ext
+            name = name[: 255 - len(ext) - 1] + "." + ext
         else:
             name = name[:255]
-    
+
     return name if name else "unnamed_file"
+
+
+# Max size of an image document that is used as-is (instead of its small thumbnail) for covers
+MAX_COVER_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def best_photo(photo):
+    """
+    Return the best-quality photo object from a Telegram message.
+    Works both when `message.photo` is a single Photo object and when it is a list of sizes.
+    """
+    if isinstance(photo, (list, tuple)):
+        return photo[-1] if photo else None
+    return photo
+
+
+def pick_cover_media(message):
+    """
+    Best image available on a Telegram message to be used as a cover.
+    Returns an object with a `file_id` (photo, image document or the largest thumbnail), or None.
+    """
+    if message is None:
+        return None
+
+    photo = best_photo(message.photo)
+    if photo:
+        return photo
+
+    document = message.document
+    if (
+        document
+        and (document.mime_type or "").startswith("image/")
+        and (document.file_size or 0) <= MAX_COVER_IMAGE_BYTES
+    ):
+        return document
+
+    for media in (message.video, message.document, message.audio):
+        thumbs = getattr(media, "thumbs", None) if media else None
+        if thumbs:
+            return thumbs[-1]
+    return None
+
+
+def original_thumbnail_file_id(message) -> Optional[str]:
+    """file_id of the thumbnail Telegram generated for the message (None if there isn't one)."""
+    if message is None:
+        return None
+    for media in (message.video, message.document, message.audio, message.photo):
+        thumbs = getattr(media, "thumbs", None) if media else None
+        if thumbs:
+            return thumbs[0].file_id
+    return None
+
 
 def add_urls_to_file(file: File) -> dict:
     """Add stream and thumbnail URLs to file response."""
@@ -57,15 +113,18 @@ def add_urls_to_file(file: File) -> dict:
         "created_at": file.created_at,
         "updated_at": file.updated_at,
         "stream_url": f"/api/stream/{file.id}",
-        "thumbnail_url": f"/api/stream/{file.id}/thumbnail" if file.thumbnail_file_id else None,
+        "thumbnail_url": f"/api/stream/{file.id}/thumbnail"
+        if file.thumbnail_file_id
+        else None,
         "last_pos": file.watch_progress[0].position if file.watch_progress else 0,
     }
-    
+
     if file.public_hash:
         data["public_hash"] = file.public_hash
         data["public_stream_url"] = f"/api/stream/s/{file.public_hash}"
-        
+
     return data
+
 
 async def fetch_recent_files(db: AsyncSession, user_id: int, limit: int) -> List[File]:
     """Get recently added files across all folders."""
@@ -79,7 +138,10 @@ async def fetch_recent_files(db: AsyncSession, user_id: int, limit: int) -> List
     result = await db.execute(query)
     return result.scalars().all()
 
-async def fetch_continue_watching_files(db: AsyncSession, user_id: int, limit: int) -> List[File]:
+
+async def fetch_continue_watching_files(
+    db: AsyncSession, user_id: int, limit: int
+) -> List[File]:
     """Get files with watch progress (not completed)."""
     query = (
         select(File)
@@ -88,7 +150,7 @@ async def fetch_continue_watching_files(db: AsyncSession, user_id: int, limit: i
             File.user_id == user_id,
             WatchProgress.user_id == user_id,
             WatchProgress.position > 0,
-            WatchProgress.completed == False
+            WatchProgress.completed == False,
         )
         .options(selectinload(File.watch_progress))
         .order_by(desc(WatchProgress.updated_at))

@@ -46,8 +46,9 @@ export default function FileCard({
 
     // Generate authenticated stream URL for thumbnail
     const token = localStorage.getItem('access_token');
+    // `v` changes when the file is updated (e.g. new cover), so the browser doesn't show a stale image
     const authorizedThumbnailUrl = file.thumbnail_url
-        ? `${file.thumbnail_url}${file.thumbnail_url.includes('?') ? '&' : '?'}token=${token}`
+        ? `${file.thumbnail_url}${file.thumbnail_url.includes('?') ? '&' : '?'}token=${token}&v=${encodeURIComponent(file.updated_at)}`
         : null;
 
     const getIcon = () => {
@@ -164,8 +165,8 @@ export default function FileCard({
                 {/* Progress Bar */}
                 {file.last_pos && file.duration && (file.last_pos / file.duration > 0.05) && (
                     <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40">
-                        <div 
-                            className="h-full bg-primary-500" 
+                        <div
+                            className="h-full bg-primary-500"
                             style={{ width: `${Math.min(100, (file.last_pos / file.duration) * 100)}%` }}
                         />
                     </div>
@@ -194,11 +195,10 @@ export default function FileCard({
                         {file.file_name}
                     </p>
                     <div className="flex items-center gap-2 mt-1">
-                        <span className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md border ${
-                            selected 
-                            ? 'bg-primary-500/20 border-primary-500/20 text-primary-300' 
-                            : 'bg-dark-800 border-white/[0.05] text-dark-400 group-hover:border-white/[0.1]'
-                        }`}>
+                        <span className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md border ${selected
+                                ? 'bg-primary-500/20 border-primary-500/20 text-primary-300'
+                                : 'bg-dark-800 border-white/[0.05] text-dark-400 group-hover:border-white/[0.1]'
+                            }`}>
                             {getSmallIcon()}
                             <span className="capitalize">{file.file_type}</span>
                         </span>
@@ -209,7 +209,7 @@ export default function FileCard({
                 </div>
 
                 <div className={`${showMenu ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
-                   <button
+                    <button
                         onClick={(e) => {
                             e.stopPropagation();
                             if (showMenu) {
@@ -222,7 +222,7 @@ export default function FileCard({
                         className={`p-1.5 rounded-lg transition-colors ${showMenu ? 'bg-white/10 text-white' : 'hover:bg-white/[0.08] text-dark-400'}`}
                     >
                         <MoreVertical className="w-4 h-4" />
-                    </button> 
+                    </button>
                 </div>
             </div>
         </div>

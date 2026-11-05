@@ -40,6 +40,9 @@ interface AppState {
     coverFolder: Folder | null;
     setCoverFolder: (folder: Folder | null) => void;
 
+    coverFile: TelegramFile | null;
+    setCoverFile: (file: TelegramFile | null) => void;
+
     moveItems: { files: TelegramFile[], folders: Folder[] } | null;
     setMoveItems: (items: { files: TelegramFile[], folders: Folder[] } | null) => void;
     setMoveFiles: (files: TelegramFile[]) => void;
@@ -131,7 +134,7 @@ export const useAppStore = create<AppState>((set) => ({
         return { selectedFolderIds: newSet };
     }),
     clearSelection: () => set({ selectedFileIds: new Set(), selectedFolderIds: new Set() }),
-    selectAll: (fileIds, folderIds = []) => set({ 
+    selectAll: (fileIds, folderIds = []) => set({
         selectedFileIds: new Set(fileIds),
         selectedFolderIds: new Set(folderIds)
     }),
@@ -152,6 +155,9 @@ export const useAppStore = create<AppState>((set) => ({
 
     coverFolder: null,
     setCoverFolder: (folder) => set({ coverFolder: folder }),
+
+    coverFile: null,
+    setCoverFile: (file) => set({ coverFile: file }),
 
     moveItems: null,
     setMoveItems: (items) => set({ moveItems: items }),

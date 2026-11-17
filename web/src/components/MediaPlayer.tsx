@@ -1,33 +1,36 @@
 /**
  * MediaPlayer - full screen video/audio player
- * Video: uses movi-player React wrapper (movi-player/react).
- * Audio: keeps the custom UI with native <audio>.
+ * Video: uses ONLY the advanced MediaFox player (canvas + Web Audio).
+ *   Subtitles extraction in-browser is disabled due to performance issues.
+ *   A prominent "Apri in VLC" button is provided for instant MKV playback with subtitles.
+ * Audio: keeps the custom UI (<audio> element).
  */
-import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import {
-    X, Play, Pause, Volume2, VolumeX, Maximize, Minimize,
-    SkipBack, SkipForward, ExternalLink, AlertTriangle, Copy,
-    Gauge, ChevronDown, ChevronUp, Languages, Check, MonitorPlay,
-    Subtitles
+    X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipForward,
+    ExternalLink, AlertTriangle, Copy, Gauge, ChevronDown, ChevronUp, Languages, Check, MonitorPlay,
 } from 'lucide-react';
-// Import ufficiale del wrapper React che evita l'errore di Rollup
-import { MoviPlayer } from 'movi-player/react';
 import { TelegramFile, formatDuration, useUpdateProgress, useFile, api } from '../lib/api';
 import { useAppStore } from '../lib/store';
 
-interface MoviTrackInfo {
-    id: number;
-    language?: string;
-    title?: string;
-    codec?: string;
-    forced?: boolean;
+function describeTrack(track: any, index: number): string {
+    const name = track?.name || track?.label || track?.title;
+    const lang = track?.language || track?.lang || track?.languageCode;
+    const parts = [name, lang && lang !== 'und' ? String(lang).toUpperCase() : null].filter(Boolean);
+    return parts.length > 0 ? parts.join(' · ') : `Track ${index + 1}`;
 }
 
-// ─── Componente principale ──────────────────────────────────────────
 export default function MediaPlayer() {
     const { previewFile: file, setPreviewFile, isPlayerMinimized, setPlayerMinimized } = useAppStore();
     if (!file) return null;
-    return <MediaPlayerContent file={file} onClose={() => setPreviewFile(null)} isMinimized={isPlayerMinimized} setMinimized={setPlayerMinimized} />;
+    return (
+        <MediaPlayerContent
+            file={file}
+            onClose={() => setPreviewFile(null)}
+            isMinimized={isPlayerMinimized}
+            setMinimized={setPlayerMinimized}
+        />
+    );
 }
 
 interface MediaPlayerContentProps {
@@ -40,7 +43,10 @@ interface MediaPlayerContentProps {
 function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaPlayerContentProps) {
     const audioRef = useRef<HTMLAudioElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
-    const playerRef = useRef<any>(null); // Riferimento al Web Component <movi-player>
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const playerRef = useRef<any>(null);
+    const advTime = useRef(0);
+    const advDuration = useRef(0);
 
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
@@ -52,35 +58,34 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [playbackSpeed, setPlaybackSpeed] = useState(1);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const hideControlsTimeout = useRef<ReturnType<typeof setTimeout>>();
+    const hideControlsTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const [publicUrl, setPublicUrl] = useState<string | null>(null);
     const resumeApplied = useRef(false);
 
-    // ── Tracce audio e sottotitoli ──
-    const [audioTracks, setAudioTracks] = useState<MoviTrackInfo[]>([]);
-    const [subtitleTracks, setSubtitleTracks] = useState<MoviTrackInfo[]>([]);
-    const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
-    const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
+    // ---- Audio tracks ----
+    const [audioTracks, setAudioTracks] = useState<{ id: number | string; label: string }[]>([]);
+    const [selectedAudio, setSelectedAudio] = useState<number | string | null>(null);
     const [showAudioMenu, setShowAudioMenu] = useState(false);
-    const [showSubtitleMenu, setShowSubtitleMenu] = useState(false);
 
     const isVideo = file.file_type === 'video';
 
     const { data: extendedFile } = useFile(file.id);
-    lastPosRef.current = extendedFile?.last_pos ?? 0;
     const { mutate: updateProgress } = useUpdateProgress();
 
     const token = localStorage.getItem('access_token');
-    const getAbsoluteUrl = (url: string) => !url ? '' : url.startsWith('http') ? url : `${window.location.origin}${url}`;
+    const getAbsoluteUrl = (url: string) =>
+        !url ? '' : url.startsWith('http') ? url : `${window.location.origin}${url}`;
     const relativeStreamUrl = `${file.stream_url}?token=${token}`;
     const authorizedStreamUrl = getAbsoluteUrl(relativeStreamUrl);
     const externalUrl = publicUrl || authorizedStreamUrl;
+
+    // VLC Desktop usually needs vlc://<url>
     const vlcUrl = `vlc://${externalUrl}`;
 
     const relativeThumbnailUrl = file.thumbnail_url ? `${file.thumbnail_url}?token=${token}` : null;
     const authorizedThumbnailUrl = relativeThumbnailUrl ? getAbsoluteUrl(relativeThumbnailUrl) : null;
 
-    // ── Link pubblico (per VLC fallback) ──
+    // ---- Public link (for VLC / external use) ----
     useEffect(() => {
         const ensurePublicLink = async () => {
             const fileData = extendedFile || file;
@@ -90,22 +95,20 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 try {
                     const { data } = await api.post<TelegramFile>(`/files/${file.id}/share`);
                     if (data.public_stream_url) setPublicUrl(getAbsoluteUrl(data.public_stream_url));
-                } catch (err) { console.error('Failed to create public link:', err); }
+                } catch (err) {
+                    console.error('Failed to create public link:', err);
+                }
             }
         };
         ensurePublicLink();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [file.id, extendedFile]);
 
     useEffect(() => { resumeApplied.current = false; }, [file.id]);
 
-    // ── Salvataggio progresso ──
+    // ---- Progress saving ----
     const snapshotProgress = useCallback(() => {
-        if (isVideo) {
-            const p = playerRef.current;
-            if (!p) return null;
-            // Nel wrapper React, l'istanza del player è accessibile tramite .player
-            return { position: p.player?.currentTime ?? 0, duration: p.player?.duration || undefined };
-        }
+        if (isVideo) return { position: advTime.current, duration: advDuration.current || undefined };
         const el = audioRef.current;
         if (!el) return null;
         return { position: el.currentTime, duration: el.duration };
@@ -128,7 +131,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
     useEffect(() => () => saveProgress(), [saveProgress]);
 
-    // ── Handler audio ──
+    // ---- <audio> handlers ----
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => { setIsPlaying(false); saveProgress(); };
     const handleTimeUpdate = () => { if (audioRef.current) setCurrentTime(audioRef.current.currentTime); };
@@ -150,15 +153,19 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const handleWaiting = () => setIsLoading(true);
     const handlePlaying = () => setIsLoading(false);
     const handleError = () => {
-        if (audioRef.current?.error) { setError("An error occurred while trying to play this file."); setIsLoading(false); }
+        if (audioRef.current?.error) {
+            setError('An error occurred while trying to play this file.');
+            setIsLoading(false);
+        }
     };
 
-    // ── Controlli ──
+    // ---- Controls ----
     const togglePlay = (e?: any) => {
-        e?.stopPropagation();
+        e?.stopPropagation?.();
         const p = playerRef.current;
-        if (p && p.player) {
-            if (isPlaying) p.player.pause(); else p.player.play().catch(() => { });
+        if (p) {
+            if (isPlaying) p.pause();
+            else Promise.resolve(p.play()).catch(() => { });
             return;
         }
         const el = audioRef.current;
@@ -167,7 +174,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
     const toggleMute = () => {
         const p = playerRef.current;
-        if (p && p.player) { p.player.muted = !isMuted; setIsMuted(!isMuted); return; }
+        if (p) { p.volume = isMuted ? (volume || 1) : 0; setIsMuted(!isMuted); return; }
         if (audioRef.current) { audioRef.current.muted = !isMuted; setIsMuted(!isMuted); }
     };
 
@@ -180,82 +187,123 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         const speeds = [0.5, 1, 1.25, 1.5, 2];
         const nextSpeed = speeds[(speeds.indexOf(playbackSpeed) + 1) % speeds.length];
         setPlaybackSpeed(nextSpeed);
-        if (playerRef.current && playerRef.current.player) playerRef.current.player.playbackRate = nextSpeed;
+        if (playerRef.current) playerRef.current.playbackRate = nextSpeed;
         else if (audioRef.current) audioRef.current.playbackRate = nextSpeed;
     };
 
     const handleSkip = (seconds: number) => {
         const p = playerRef.current;
-        if (p && p.player) { p.player.currentTime = Math.max(0, p.player.currentTime + seconds); return; }
+        if (p) {
+            const max = advDuration.current || Infinity;
+            const target = Math.min(max, Math.max(0, advTime.current + seconds));
+            Promise.resolve(p.seek(target)).catch(() => { });
+            setCurrentTime(target);
+            return;
+        }
         if (audioRef.current) audioRef.current.currentTime += seconds;
     };
 
     const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
         const time = parseFloat(e.target.value);
         const p = playerRef.current;
-        if (p && p.player) { p.player.currentTime = time; setCurrentTime(time); return; }
+        if (p) { Promise.resolve(p.seek(time)).catch(() => { }); setCurrentTime(time); return; }
         if (audioRef.current) { audioRef.current.currentTime = time; setCurrentTime(time); }
     };
 
     const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const vol = parseFloat(e.target.value);
-        if (playerRef.current && playerRef.current.player) {
-            playerRef.current.player.volume = vol;
-            setVolume(vol);
-            setIsMuted(vol === 0);
-        }
-        else if (audioRef.current) { audioRef.current.volume = vol; setVolume(vol); setIsMuted(vol === 0); }
+        if (playerRef.current) playerRef.current.volume = vol;
+        else if (audioRef.current) audioRef.current.volume = vol;
+        setVolume(vol);
+        setIsMuted(vol === 0);
     };
 
-    // ── Selezione tracce ──
-    const selectAudioTrack = (id: number) => {
+    const selectAudioTrack = async (id: number | string) => {
         const p = playerRef.current;
-        if (!p || !p.player) return;
-        // Metodi del player per il cambio traccia
-        p.player.setAudioTrack(id);
-        setSelectedAudio(id);
+        if (!p) return;
+        try { await p.selectAudioTrack(id); setSelectedAudio(id); }
+        catch (err) { console.error('Failed to switch audio track:', err); }
         setShowAudioMenu(false);
     };
 
-    const selectSubtitleTrack = (id: number | null) => {
-        const p = playerRef.current;
-        if (!p || !p.player) return;
-        // Metodo per abilitare/disabilitare i sottotitoli
-        p.player.setSubtitleTrack(id);
-        setSelectedSubtitle(id);
-        setShowSubtitleMenu(false);
-    };
+    // ---- MediaFox initialization (video only) ----
+    useEffect(() => {
+        if (!isVideo || !canvasRef.current) return;
 
-    // ── Gestione eventi del player video (tramite wrapper React) ──
-    const onPlayerReady = (el: any) => {
-        setIsLoading(false);
+        let cancelled = false;
+        let player: any = null;
+        const unsubscribers: Array<() => void> = [];
 
-        // Recupera le tracce audio e sottotitoli
-        const aTracks = el.player?.getAudioTracks?.() ?? [];
-        const sTracks = el.player?.getSubtitleTracks?.() ?? [];
-        setAudioTracks(aTracks);
-        setSubtitleTracks(sTracks);
+        setIsLoading(true);
+        setError(null);
+        advTime.current = 0;
+        advDuration.current = 0;
 
-        if (aTracks.length > 0) setSelectedAudio(aTracks[0].id);
-        setSelectedSubtitle(null); // Sottotitoli disattivati di default
+        (async () => {
+            try {
+                const { MediaFox } = await import('@mediafox/core');
+                if (cancelled || !canvasRef.current) return;
 
-        // Riprendi da posizione salvata
-        const start = extendedFile?.last_pos ?? 0;
-        if (start > 1) {
-            el.player.currentTime = start;
-            setCurrentTime(start);
-        }
-        resumeApplied.current = true;
-    };
+                player = new MediaFox({ renderTarget: canvasRef.current, volume: isMuted ? 0 : volume });
+                playerRef.current = player;
 
-    // ── Fullscreen listener ──
+                let wasPlaying = false;
+                const unsubscribe = player.subscribe((s: any) => {
+                    const playing = !!(s.playing ?? s.state === 'playing');
+                    advTime.current = s.currentTime ?? advTime.current;
+                    setCurrentTime(advTime.current);
+                    if (s.duration) { advDuration.current = s.duration; setDuration(s.duration); }
+                    setIsPlaying(playing);
+                    if (wasPlaying && !playing) saveProgressRef.current();
+                    wasPlaying = playing;
+                });
+                if (typeof unsubscribe === 'function') unsubscribers.push(unsubscribe);
+
+                player.on?.('error', () => {
+                    if (cancelled) return;
+                    setError('The player could not play this file. The format may not be supported.');
+                    setIsLoading(false);
+                });
+
+                await player.load(authorizedStreamUrl);
+                if (cancelled) return;
+
+                const tracks: any[] = player.getAudioTracks?.() ?? [];
+                setAudioTracks(tracks.map((t, i) => ({ id: t.id, label: describeTrack(t, i) })));
+                setSelectedAudio(tracks[0]?.id ?? null);
+
+                const start = extendedFile?.last_pos ?? 0;
+                if (start > 1) await player.seek(start);
+                if (cancelled) return;
+
+                setIsLoading(false);
+                await player.play();
+            } catch (err) {
+                console.error('Advanced player failed:', err);
+                if (!cancelled) {
+                    setError('The player could not load this file. The format may not be supported.');
+                    setIsLoading(false);
+                }
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+            unsubscribers.forEach((u) => u());
+            try { const dispose = player?.dispose ?? player?.destroy; dispose?.call(player); } catch { }
+            playerRef.current = null;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isVideo, file.id]);
+
+    // ---- Fullscreen state ----
     useEffect(() => {
         const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
         document.addEventListener('fullscreenchange', onFsChange);
         return () => document.removeEventListener('fullscreenchange', onFsChange);
     }, []);
 
-    // ── Scorciatoie tastiera ──
+    // ---- Keyboard shortcuts ----
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (error) return;
@@ -273,48 +321,30 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isFullscreen, onClose, error, isPlaying, isMinimized, isMuted]);
 
     const handleMouseMove = () => {
         setShowControls(true);
         if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
-        hideControlsTimeout.current = setTimeout(() => { if (isPlaying && !isMinimized) setShowControls(false); }, 3000);
+        hideControlsTimeout.current = setTimeout(() => {
+            if (isPlaying && !isMinimized) setShowControls(false);
+        }, 3000);
     };
 
-    // ── Autoplay audio ──
+    useEffect(() => () => {
+        if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
+    }, []);
+
+    // ---- Audio autoplay ----
     useEffect(() => {
         if (!isVideo && audioRef.current && !error) audioRef.current.play().catch(() => { });
     }, [error, file.id, isVideo]);
 
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
 
-    // ── Etichette tracce ──
-    const describeTrack = (track: MoviTrackInfo, index: number): string => {
-        const lang = track.language?.toUpperCase();
-        const title = track.title;
-        const parts = [title, lang].filter(Boolean);
-        return parts.length > 0 ? parts.join(' · ') : `Track ${index + 1}`;
-    };
-
-    // ── Elemento media ──
     const MediaElement = isVideo ? (
-        <div
-            className={`max-w-full max-h-full w-full h-full object-contain bg-black ${isMinimized ? 'hidden' : ''}`}
-            onClick={togglePlay}
-        >
-            <MoviPlayer
-                ref={playerRef}
-                src={authorizedStreamUrl}
-                controls={false} // Disabilitiamo i controlli nativi per usare i tuoi
-                style={{ width: '100%', height: '100%' }}
-                onReady={onPlayerReady}
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => { setIsPlaying(false); saveProgressRef.current(); }}
-                onTimeUpdate={(e: any) => setCurrentTime(e.target.player?.currentTime ?? 0)}
-                onDurationChange={(e: any) => setDuration(e.target.player?.duration ?? 0)}
-                onError={() => setError('The player could not play this file. The format may not be supported.')}
-            />
-        </div>
+        <canvas ref={canvasRef} className="w-full h-full object-contain" />
     ) : (
         <audio
             ref={audioRef}
@@ -330,17 +360,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     );
 
     const overlayVisible = showControls || !isPlaying;
-    uiActiveRef.current = overlayVisible || isMinimized;
-
-    // Keep Movi's own subtitles clear of the control bar
-    useEffect(() => {
-        playerRef.current?.setSubtitlePadding?.(overlayVisible ? 120 : 24);
-    }, [overlayVisible]);
-
-    // When the controls show up again, catch the clock up immediately
-    useEffect(() => {
-        if (isVideo && (overlayVisible || isMinimized)) setCurrentTime(advTime.current);
-    }, [isVideo, overlayVisible, isMinimized]);
 
     return (
         <div
@@ -359,14 +378,17 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         <p className="text-dark-300 mb-6">{error}</p>
                         <div className="flex flex-col gap-3">
                             <a href={vlcUrl} className="btn-primary flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-500">
-                                <MonitorPlay className="w-5 h-5" /> Apri in VLC
+                                <MonitorPlay className="w-5 h-5" />Apri in VLC
                             </a>
                             <a href={externalUrl} className="btn-secondary flex items-center justify-center gap-2">
-                                <ExternalLink className="w-4 h-4" /> Apri URL Diretto
+                                <ExternalLink className="w-4 h-4" />Apri URL Diretto
                             </a>
                             <div className="flex gap-3 mt-2">
-                                <Button onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(externalUrl); }} className="flex-1 btn-secondary flex items-center justify-center gap-2">
-                                    <Copy className="w-4 h-4" /> Copia URL
+                                <Button
+                                    onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(externalUrl); }}
+                                    className="flex-1 btn-secondary flex items-center justify-center gap-2"
+                                >
+                                    <Copy className="w-4 h-4" />Copia URL
                                 </Button>
                             </div>
                         </div>
@@ -378,8 +400,15 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                             <div className="text-center z-10 glass-panel p-10 animate-scale-in absolute overflow-hidden">
                                 {authorizedThumbnailUrl ? (
                                     <div className="w-64 h-64 mx-auto mb-6 rounded-2xl bg-dark-800 shadow-2xl overflow-hidden border border-white/10 relative group">
-                                        <img src={authorizedThumbnailUrl} alt={file.file_name} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.parentElement?.classList.add('hidden'); }} />
-                                        <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent flex items-end justify-center pb-4 opacity-0 group-hover:opacity-100 transition-opacity"><span className="text-white text-sm font-medium">Original Artwork</span></div>
+                                        <img
+                                            src={authorizedThumbnailUrl}
+                                            alt={file.file_name}
+                                            className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+                                            onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.parentElement?.classList.add('hidden'); }}
+                                        />
+                                        <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent flex items-end justify-center pb-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <span className="text-white text-sm font-medium">Original Artwork</span>
+                                        </div>
                                     </div>
                                 ) : (
                                     <div className="w-64 h-64 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary-500/20 to-pink-500/20 flex items-center justify-center border border-white/[0.08] shadow-2xl relative overflow-hidden group">
@@ -392,16 +421,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                             </div>
                         )}
                         {MediaElement}
-                        {useMovi && isVideo && (
-                            <div
-                                ref={moviOverlayRef}
-                                className="absolute inset-0 pointer-events-none z-20"
-                                style={{ color: '#fff', textAlign: 'center', fontSize: 'clamp(18px, 2.4vw, 34px)', textShadow: '0 1px 3px rgba(0,0,0,0.9)' }}
-                            />
-                        )}
-                        {isVideo && !isMinimized && (
-                            <SubtitleOverlay cues={activeCues} getTime={getPlayerTime} lifted={overlayVisible} />
-                        )}
                         {isLoading && !error && !isMinimized && (
                             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
                                 <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-500"></div>
@@ -411,12 +430,14 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 )}
             </div>
 
-            {/* ── Controlli minimizzati ── */}
+            {/* Minimized controls */}
             {isMinimized && (
                 <div className="max-w-7xl mx-auto flex items-center justify-between gap-4 p-3 h-full">
                     <div className="flex items-center gap-3 overflow-hidden flex-1 cursor-pointer" onClick={() => setMinimized(false)}>
                         <div className="w-12 h-12 rounded-lg bg-dark-800 flex items-center justify-center flex-shrink-0 overflow-hidden border border-white/5 relative">
-                            {authorizedThumbnailUrl ? <img src={authorizedThumbnailUrl} alt="Thumb" className="w-full h-full object-cover" /> : (isVideo ? <span className="text-2xl">🎬</span> : <span className="text-2xl">🎵</span>)}
+                            {authorizedThumbnailUrl
+                                ? <img src={authorizedThumbnailUrl} alt="Thumb" className="w-full h-full object-cover" />
+                                : (isVideo ? <span className="text-2xl">🎬</span> : <span className="text-2xl">🎵</span>)}
                         </div>
                         <div className="truncate flex-1 min-w-0">
                             <h4 className="text-sm font-bold text-white truncate leading-tight">{file.file_name}</h4>
@@ -425,77 +446,73 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                     </div>
                     <div className="flex items-center gap-3">
                         <button onClick={(e) => { e.stopPropagation(); handleSkip(-10); }} className="p-2 text-dark-300 hover:text-white"><SkipBack className="w-5 h-5" /></button>
-                        <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} className="p-2 bg-primary-600 rounded-full text-white hover:bg-primary-500 shadow-lg shadow-primary-500/20">{isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}</button>
+                        <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} className="p-2 bg-primary-600 rounded-full text-white hover:bg-primary-500 shadow-lg shadow-primary-500/20">
+                            {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+                        </button>
                         <button onClick={(e) => { e.stopPropagation(); handleSkip(10); }} className="p-2 text-dark-300 hover:text-white"><SkipForward className="w-5 h-5" /></button>
                     </div>
                     <div className="flex items-center gap-2 border-l border-white/10 pl-4">
                         <button onClick={() => setMinimized(false)} className="p-2 text-dark-400 hover:text-white" title="Maximize"><ChevronUp className="w-5 h-5" /></button>
                         <button onClick={onClose} className="p-2 text-dark-400 hover:text-red-400" title="Close"><X className="w-5 h-5" /></button>
                     </div>
-                    <div className="absolute top-0 left-0 right-0 h-0.5 bg-dark-800"><div className="h-full bg-primary-500" style={{ width: `${progressPercent}%` }}></div></div>
+                    <div className="absolute top-0 left-0 right-0 h-0.5 bg-dark-800">
+                        <div className="h-full bg-primary-500" style={{ width: `${progressPercent}%` }}></div>
+                    </div>
                 </div>
             )}
 
-            {/* ── Overlay controlli ── */}
+            {/* Overlay: top bar and custom controls */}
             {!error && !isMinimized && (
-                <div className={`absolute inset-0 transition-opacity duration-300 ${overlayVisible ? 'opacity-100' : 'opacity-0'} ${!overlayVisible ? 'cursor-none' : ''}`} style={{ pointerEvents: overlayVisible ? 'auto' : 'none' }}>
-                    {/* Barra superiore */}
-                    <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 to-transparent flex items-start justify-between z-30" style={{ pointerEvents: overlayVisible ? 'auto' : 'none' }}>
+                <div
+                    className={`absolute inset-0 transition-opacity duration-300 ${overlayVisible ? 'opacity-100' : 'opacity-0'} ${!overlayVisible ? 'cursor-none' : ''}`}
+                    style={{ pointerEvents: overlayVisible ? 'auto' : 'none' }}
+                >
+                    <div
+                        className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 to-transparent flex items-start justify-between z-30"
+                        style={{ pointerEvents: overlayVisible ? 'auto' : 'none' }}
+                    >
                         <div>
                             <h3 className="text-lg font-medium truncate max-w-lg text-white">{file.file_name}</h3>
-                            {((extendedFile?.last_pos || 0) > 0) && currentTime < 5 && <p className="text-xs text-primary-400">Resumed from {formatDuration(extendedFile?.last_pos || 0)}</p>}
+                            {((extendedFile?.last_pos || 0) > 0) && currentTime < 5 && (
+                                <p className="text-xs text-primary-400">Resumed from {formatDuration(extendedFile?.last_pos || 0)}</p>
+                            )}
                         </div>
                         <div className="flex items-center gap-2">
 
-                            {/* VLC fallback */}
+                            {/* VLC button */}
                             {isVideo && (
                                 <a
                                     href={vlcUrl}
                                     className="flex items-center gap-2 px-3 py-1.5 bg-primary-600 hover:bg-primary-500 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-primary-500/20"
-                                    title="Apri in VLC (fallback)"
+                                    title="Apri in VLC (Consigliato per MKV con sottotitoli)"
                                 >
                                     <MonitorPlay className="w-4 h-4" />
-                                    <span className="hidden sm:inline">VLC</span>
+                                    <span className="hidden sm:inline">Apri in VLC</span>
                                 </a>
                             )}
 
-                            {/* Menu audio */}
-                            {isVideo && audioTracks.length > 0 && (
+                            {/* Audio menu */}
+                            {isVideo && (
                                 <div className="relative ml-2">
-                                    <button onClick={() => { setShowAudioMenu((v) => !v); setShowSubtitleMenu(false); }} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors flex items-center gap-1.5" title="Audio tracks">
+                                    <button
+                                        onClick={() => setShowAudioMenu((v) => !v)}
+                                        className="p-2 text-white hover:bg-white/20 rounded-full transition-colors flex items-center gap-1.5"
+                                        title="Audio tracks"
+                                    >
                                         <Languages className="w-5 h-5" />
                                     </button>
                                     {showAudioMenu && (
-                                        <div className="absolute right-0 top-full mt-2 min-w-[250px] max-h-[70vh] overflow-y-auto bg-dark-800 border border-white/10 rounded-xl shadow-2xl p-1 z-40">
-                                            <p className="px-3 py-2 text-xs text-dark-400">Audio</p>
-                                            {audioTracks.map((track, i) => (
-                                                <button key={track.id} onClick={() => selectAudioTrack(track.id)} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedAudio === track.id ? 'text-primary-300' : 'text-white'}`}>
-                                                    <span className="truncate">{describeTrack(track, i)}</span>
-                                                    {selectedAudio === track.id && <Check className="w-4 h-4 shrink-0" />}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            {/* Menu sottotitoli */}
-                            {isVideo && subtitleTracks.length > 0 && (
-                                <div className="relative ml-2">
-                                    <button onClick={() => { setShowSubtitleMenu((v) => !v); setShowAudioMenu(false); }} className={`p-2 rounded-full transition-colors flex items-center gap-1.5 ${selectedSubtitle !== null ? 'bg-primary-500/30 text-primary-300' : 'text-white hover:bg-white/20'}`} title="Subtitles">
-                                        <Subtitles className="w-5 h-5" />
-                                    </button>
-                                    {showSubtitleMenu && (
                                         <div className="absolute right-0 top-full mt-2 min-w-[230px] bg-dark-800/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl p-1 z-40">
-                                            <p className="px-3 py-2 text-xs text-dark-400">Sottotitoli</p>
-                                            <button onClick={() => selectSubtitleTrack(null)} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === null ? 'text-primary-300' : 'text-white'}`}>
-                                                <span>Off</span>
-                                                {selectedSubtitle === null && <Check className="w-4 h-4 shrink-0" />}
-                                            </button>
-                                            {subtitleTracks.map((track, i) => (
-                                                <button key={track.id} onClick={() => selectSubtitleTrack(track.id)} className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedSubtitle === track.id ? 'text-primary-300' : 'text-white'}`}>
-                                                    <span className="truncate">{describeTrack(track, i)}</span>
-                                                    {selectedSubtitle === track.id && <Check className="w-4 h-4 shrink-0" />}
+                                            <p className="px-3 py-2 text-xs text-dark-400">Audio</p>
+                                            {audioTracks.length === 0 && <p className="px-3 py-2 text-sm text-dark-300">No audio tracks found</p>}
+                                            {audioTracks.map((track) => (
+                                                <button
+                                                    key={String(track.id)}
+                                                    onClick={() => selectAudioTrack(track.id)}
+                                                    className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedAudio === track.id ? 'text-primary-300' : 'text-white'}`}
+                                                >
+                                                    <span className="truncate">{track.label}</span>
+                                                    {selectedAudio === track.id && <Check className="w-4 h-4 shrink-0" />}
                                                 </button>
                                             ))}
                                         </div>
@@ -508,36 +525,71 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     </div>
 
-                    {/* Controlli centrali */}
+                    {/* Center controls */}
                     <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex items-center gap-8 z-30">
                         <button onClick={(e) => { e.stopPropagation(); handleSkip(-10); }} className="p-4 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-all"><SkipBack className="w-8 h-8" /></button>
-                        <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} className="w-20 h-20 bg-white/20 backdrop-blur rounded-full flex items-center justify-center hover:bg-white/30 transition-all scale-100 hover:scale-105">{isPlaying ? <Pause className="w-10 h-10 text-white" /> : <Play className="w-10 h-10 ml-1 text-white" />}</button>
+                        <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} className="w-20 h-20 bg-white/20 backdrop-blur rounded-full flex items-center justify-center hover:bg-white/30 transition-all scale-100 hover:scale-105">
+                            {isPlaying ? <Pause className="w-10 h-10 text-white" /> : <Play className="w-10 h-10 ml-1 text-white" />}
+                        </button>
                         <button onClick={(e) => { e.stopPropagation(); handleSkip(10); }} className="p-4 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-all"><SkipForward className="w-8 h-8" /></button>
                     </div>
 
-                    {/* Controlli inferiori */}
+                    {/* Bottom controls */}
                     <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30">
                         <div className="flex items-center gap-4 mb-4 group/progress">
                             <span className="text-sm font-medium text-white/90 min-w-[50px] font-mono">{formatDuration(Math.floor(currentTime))}</span>
                             <div className="relative flex-1 h-1 bg-white/20 rounded-full cursor-pointer group-hover/progress:h-2 transition-all">
-                                <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary-500 to-primary-400 rounded-full transition-all" style={{ width: `${progressPercent}%` }}><div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-4 h-4 bg-white rounded-full opacity-0 group-hover/progress:opacity-100 transition-all shadow-lg shadow-primary-500/50 scale-75 group-hover/progress:scale-100"></div></div>
-                                <input type="range" min={0} max={duration || 100} value={currentTime} onChange={handleSeek} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                                <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary-500 to-primary-400 rounded-full transition-all" style={{ width: `${progressPercent}%` }}>
+                                    <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-4 h-4 bg-white rounded-full opacity-0 group-hover/progress:opacity-100 transition-all shadow-lg shadow-primary-500/50 scale-75 group-hover/progress:scale-100"></div>
+                                </div>
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={duration || 100}
+                                    value={currentTime}
+                                    onChange={handleSeek}
+                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                />
                             </div>
                             <span className="text-sm font-medium text-white/90 min-w-[50px] text-right font-mono">{formatDuration(Math.floor(duration))}</span>
                         </div>
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-3">
-                                <button onClick={togglePlay} className="p-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all hover:scale-105">{isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}</button>
+                                <button onClick={togglePlay} className="p-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all hover:scale-105">
+                                    {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
+                                </button>
                                 <div className="flex items-center gap-2 group/vol">
-                                    <button onClick={toggleMute} className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all">{isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}</button>
+                                    <button onClick={toggleMute} className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all">
+                                        {isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+                                    </button>
                                     <div className="w-0 overflow-hidden group-hover/vol:w-24 transition-all duration-300">
-                                        <input type="range" min={0} max={1} step={0.05} value={isMuted ? 0 : volume} onChange={handleVolumeChange} className="w-20 h-1 bg-white/30 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-lg" />
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={1}
+                                            step={0.05}
+                                            value={isMuted ? 0 : volume}
+                                            onChange={handleVolumeChange}
+                                            className="w-20 h-1 bg-white/30 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-lg"
+                                        />
                                     </div>
                                 </div>
                             </div>
                             <div className="flex items-center gap-2">
-                                <button onClick={cycleSpeed} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${playbackSpeed !== 1 ? 'bg-primary-500/30 text-primary-300 border border-primary-500/40' : 'bg-white/10 text-white/80 border border-white/10 hover:bg-white/20 hover:text-white'}`} title="Playback Speed"><Gauge className="w-4 h-4" /><span>{playbackSpeed}x</span></button>
-                                <button onClick={toggleFullscreen} className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all" title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}>{isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}</button>
+                                <button
+                                    onClick={cycleSpeed}
+                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${playbackSpeed !== 1 ? 'bg-primary-500/30 text-primary-300 border border-primary-500/40' : 'bg-white/10 text-white/80 border border-white/10 hover:bg-white/20 hover:text-white'}`}
+                                    title="Playback Speed"
+                                >
+                                    <Gauge className="w-4 h-4" /><span>{playbackSpeed}x</span>
+                                </button>
+                                <button
+                                    onClick={toggleFullscreen}
+                                    className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all"
+                                    title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                                >
+                                    {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -547,6 +599,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     );
 }
 
-function Button({ onClick, className, children }: { onClick?: (e: any) => void, className?: string, children: React.ReactNode }) {
+function Button({ onClick, className, children }: { onClick?: (e: any) => void; className?: string; children: React.ReactNode }) {
     return <button onClick={onClick} className={className}>{children}</button>;
 }

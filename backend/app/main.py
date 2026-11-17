@@ -93,6 +93,9 @@ async def add_security_headers(request: Request, call_next):
     
     # Referrer policy - don't leak URLs
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
     
     # Content Security Policy (adjust as needed for your frontend)
     # response.headers["Content-Security-Policy"] = "default-src 'self'"

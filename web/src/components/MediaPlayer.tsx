@@ -1,24 +1,28 @@
 /**
- * MediaPlayer - full screen video/audio player
- * Video: uses ONLY the advanced MediaFox player (canvas + Web Audio).
- *   Subtitles extraction in-browser is disabled due to performance issues.
- *   A prominent "Apri in VLC" button is provided for instant MKV playback with subtitles.
- * Audio: keeps the custom UI (<audio> element).
+ * MediaPlayer - versione basata su `movi-player`
+ *
+ *   npm i movi-player
+ *
+ * Video: <movi-player> (FFmpeg/libavformat in WASM + WebCodecs + canvas WebGL2).
+ *        Tracce audio, sottotitoli incorporati (SRT/ASS/SSA/VTT/PGS), velocità, fullscreen
+ *        e scorciatoie sono gestiti dal componente stesso: qui restano solo la cornice
+ *        (titolo, "Apri in VLC", minimizza, chiudi), il salvataggio del progresso e il resume.
+ * Audio: UI custom con <audio>, invariata.
+ *
+ * NOTA: scritto leggendo la documentazione di movi-player (AGENTS.md v0.4.1), non ancora provato.
+ * Verifica in particolare: registrazione dell'elemento via `import('movi-player')`,
+ * caricamento del file .wasm col tuo bundler, e nomi degli eventi (`timeupdate`, `play`, `pause`,
+ * `loadeddata`, `error`).
  */
-import { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import {
-    X, Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipBack, SkipForward,
-    ExternalLink, AlertTriangle, Copy, Gauge, ChevronDown, ChevronUp, Languages, Check, MonitorPlay,
+    X, Play, Pause, Volume2, VolumeX, SkipBack, SkipForward,
+    ExternalLink, AlertTriangle, Copy, Gauge, ChevronDown, ChevronUp, MonitorPlay,
 } from 'lucide-react';
 import { TelegramFile, formatDuration, useUpdateProgress, useFile, api } from '../lib/api';
 import { useAppStore } from '../lib/store';
 
-function describeTrack(track: any, index: number): string {
-    const name = track?.name || track?.label || track?.title;
-    const lang = track?.language || track?.lang || track?.languageCode;
-    const parts = [name, lang && lang !== 'und' ? String(lang).toUpperCase() : null].filter(Boolean);
-    return parts.length > 0 ? parts.join(' · ') : `Track ${index + 1}`;
-}
+const UI_UPDATE_INTERVAL_MS = 250;
 
 export default function MediaPlayer() {
     const { previewFile: file, setPreviewFile, isPlayerMinimized, setPlayerMinimized } = useAppStore();
@@ -42,11 +46,10 @@ interface MediaPlayerContentProps {
 
 function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaPlayerContentProps) {
     const audioRef = useRef<HTMLAudioElement>(null);
+    const moviRef = useRef<any>(null);
     const containerRef = useRef<HTMLDivElement>(null);
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const playerRef = useRef<any>(null);
-    const advTime = useRef(0);
-    const advDuration = useRef(0);
+    const vidTime = useRef(0);
+    const vidDuration = useRef(0);
 
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
@@ -54,32 +57,27 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [volume, setVolume] = useState(1);
     const [isMuted, setIsMuted] = useState(false);
     const [showControls, setShowControls] = useState(true);
-    const [isFullscreen, setIsFullscreen] = useState(false);
     const [playbackSpeed, setPlaybackSpeed] = useState(1);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [moviReady, setMoviReady] = useState(false);
     const hideControlsTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const [publicUrl, setPublicUrl] = useState<string | null>(null);
     const resumeApplied = useRef(false);
-
-    // ---- Audio tracks ----
-    const [audioTracks, setAudioTracks] = useState<{ id: number | string; label: string }[]>([]);
-    const [selectedAudio, setSelectedAudio] = useState<number | string | null>(null);
-    const [showAudioMenu, setShowAudioMenu] = useState(false);
+    const publicLinkRequestedFor = useRef<string | number | null>(null);
 
     const isVideo = file.file_type === 'video';
 
     const { data: extendedFile } = useFile(file.id);
+    const extendedFileRef = useRef(extendedFile);
+    extendedFileRef.current = extendedFile;
     const { mutate: updateProgress } = useUpdateProgress();
 
     const token = localStorage.getItem('access_token');
     const getAbsoluteUrl = (url: string) =>
         !url ? '' : url.startsWith('http') ? url : `${window.location.origin}${url}`;
-    const relativeStreamUrl = `${file.stream_url}?token=${token}`;
-    const authorizedStreamUrl = getAbsoluteUrl(relativeStreamUrl);
+    const authorizedStreamUrl = getAbsoluteUrl(`${file.stream_url}?token=${token}`);
     const externalUrl = publicUrl || authorizedStreamUrl;
-
-    // VLC Desktop usually needs vlc://<url>
     const vlcUrl = `vlc://${externalUrl}`;
 
     const relativeThumbnailUrl = file.thumbnail_url ? `${file.thumbnail_url}?token=${token}` : null;
@@ -87,28 +85,29 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
     // ---- Public link (for VLC / external use) ----
     useEffect(() => {
-        const ensurePublicLink = async () => {
-            const fileData = extendedFile || file;
-            if (fileData.public_stream_url) {
-                setPublicUrl(getAbsoluteUrl(fileData.public_stream_url));
-            } else {
-                try {
-                    const { data } = await api.post<TelegramFile>(`/files/${file.id}/share`);
-                    if (data.public_stream_url) setPublicUrl(getAbsoluteUrl(data.public_stream_url));
-                } catch (err) {
-                    console.error('Failed to create public link:', err);
-                }
+        const fileData = extendedFile || file;
+        if (fileData.public_stream_url) {
+            setPublicUrl(getAbsoluteUrl(fileData.public_stream_url));
+            return;
+        }
+        if (publicLinkRequestedFor.current === file.id) return;
+        publicLinkRequestedFor.current = file.id;
+        (async () => {
+            try {
+                const { data } = await api.post<TelegramFile>(`/files/${file.id}/share`);
+                if (data.public_stream_url) setPublicUrl(getAbsoluteUrl(data.public_stream_url));
+            } catch (err) {
+                console.error('Failed to create public link:', err);
             }
-        };
-        ensurePublicLink();
+        })();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [file.id, extendedFile]);
+    }, [file.id, extendedFile?.public_stream_url]);
 
     useEffect(() => { resumeApplied.current = false; }, [file.id]);
 
     // ---- Progress saving ----
     const snapshotProgress = useCallback(() => {
-        if (isVideo) return { position: advTime.current, duration: advDuration.current || undefined };
+        if (isVideo) return { position: vidTime.current, duration: vidDuration.current || undefined };
         const el = audioRef.current;
         if (!el) return null;
         return { position: el.currentTime, duration: el.duration };
@@ -130,6 +129,75 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     }, [isPlaying, error]);
 
     useEffect(() => () => saveProgress(), [saveProgress]);
+
+    // ---- Video: registra il web component ----
+    useEffect(() => {
+        if (!isVideo) return;
+        let cancelled = false;
+        setMoviReady(false);
+        setError(null);
+        vidTime.current = 0;
+        vidDuration.current = 0;
+        import('movi-player')
+            .then(() => { if (!cancelled) setMoviReady(true); })
+            .catch((err) => {
+                console.error('movi-player failed to load:', err);
+                if (!cancelled) setError('Impossibile caricare il player video.');
+            });
+        return () => { cancelled = true; };
+    }, [isVideo, file.id]);
+
+    // ---- Video: eventi del componente ----
+    useEffect(() => {
+        if (!isVideo || !moviReady) return;
+        const el = moviRef.current;
+        if (!el) return;
+
+        let lastUi = 0;
+        const syncDuration = () => {
+            const d = Number(el.duration);
+            if (d && d !== vidDuration.current) { vidDuration.current = d; setDuration(d); }
+        };
+        const onTime = (e: any) => {
+            const t = typeof e.detail === 'number' ? e.detail : Number(el.currentTime) || 0;
+            vidTime.current = t;
+            const now = performance.now();
+            if (now - lastUi >= UI_UPDATE_INTERVAL_MS) {
+                lastUi = now;
+                setCurrentTime(t);
+                syncDuration();
+            }
+        };
+        const onPlay = () => setIsPlaying(true);
+        const onPause = () => { setIsPlaying(false); saveProgressRef.current(); };
+        const onLoaded = () => {
+            syncDuration();
+            setIsLoading(false);
+            const last = extendedFileRef.current?.last_pos ?? 0;
+            if (!resumeApplied.current && last > 1) {
+                const total = vidDuration.current || extendedFileRef.current?.duration || 0;
+                if (!total || last < total * 0.95) el.currentTime = last;
+            }
+            resumeApplied.current = true;
+        };
+        const onError = (e: any) => {
+            console.error('movi-player error:', e?.detail);
+            setError('Il player non è riuscito a riprodurre questo file.');
+        };
+
+        el.addEventListener('timeupdate', onTime);
+        el.addEventListener('play', onPlay);
+        el.addEventListener('pause', onPause);
+        el.addEventListener('loadeddata', onLoaded);
+        el.addEventListener('error', onError);
+        return () => {
+            el.removeEventListener('timeupdate', onTime);
+            el.removeEventListener('play', onPlay);
+            el.removeEventListener('pause', onPause);
+            el.removeEventListener('loadeddata', onLoaded);
+            el.removeEventListener('error', onError);
+        };
+    }, [isVideo, moviReady, file.id]);
 
     // ---- <audio> handlers ----
     const handlePlay = () => setIsPlaying(true);
@@ -159,13 +227,14 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         }
     };
 
-    // ---- Controls ----
+    // ---- Controls (usati da audio e dalla barra minimizzata) ----
     const togglePlay = (e?: any) => {
         e?.stopPropagation?.();
-        const p = playerRef.current;
-        if (p) {
-            if (isPlaying) p.pause();
-            else Promise.resolve(p.play()).catch(() => { });
+        if (isVideo) {
+            const el = moviRef.current;
+            if (!el) return;
+            if (el.paused) Promise.resolve(el.play()).catch(() => { });
+            else el.pause();
             return;
         }
         const el = audioRef.current;
@@ -173,30 +242,23 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     };
 
     const toggleMute = () => {
-        const p = playerRef.current;
-        if (p) { p.volume = isMuted ? (volume || 1) : 0; setIsMuted(!isMuted); return; }
         if (audioRef.current) { audioRef.current.muted = !isMuted; setIsMuted(!isMuted); }
-    };
-
-    const toggleFullscreen = () => {
-        if (!document.fullscreenElement) { containerRef.current?.requestFullscreen(); setIsFullscreen(true); }
-        else { document.exitFullscreen(); setIsFullscreen(false); }
     };
 
     const cycleSpeed = () => {
         const speeds = [0.5, 1, 1.25, 1.5, 2];
-        const nextSpeed = speeds[(speeds.indexOf(playbackSpeed) + 1) % speeds.length];
-        setPlaybackSpeed(nextSpeed);
-        if (playerRef.current) playerRef.current.playbackRate = nextSpeed;
-        else if (audioRef.current) audioRef.current.playbackRate = nextSpeed;
+        const next = speeds[(speeds.indexOf(playbackSpeed) + 1) % speeds.length];
+        setPlaybackSpeed(next);
+        if (audioRef.current) audioRef.current.playbackRate = next;
     };
 
     const handleSkip = (seconds: number) => {
-        const p = playerRef.current;
-        if (p) {
-            const max = advDuration.current || Infinity;
-            const target = Math.min(max, Math.max(0, advTime.current + seconds));
-            Promise.resolve(p.seek(target)).catch(() => { });
+        if (isVideo) {
+            const el = moviRef.current;
+            if (!el) return;
+            const max = vidDuration.current || Infinity;
+            const target = Math.min(max, Math.max(0, vidTime.current + seconds));
+            el.currentTime = target;
             setCurrentTime(target);
             return;
         }
@@ -205,124 +267,29 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
 
     const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
         const time = parseFloat(e.target.value);
-        const p = playerRef.current;
-        if (p) { Promise.resolve(p.seek(time)).catch(() => { }); setCurrentTime(time); return; }
         if (audioRef.current) { audioRef.current.currentTime = time; setCurrentTime(time); }
     };
 
     const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const vol = parseFloat(e.target.value);
-        if (playerRef.current) playerRef.current.volume = vol;
-        else if (audioRef.current) audioRef.current.volume = vol;
+        if (audioRef.current) audioRef.current.volume = vol;
         setVolume(vol);
         setIsMuted(vol === 0);
     };
 
-    const selectAudioTrack = async (id: number | string) => {
-        const p = playerRef.current;
-        if (!p) return;
-        try { await p.selectAudioTrack(id); setSelectedAudio(id); }
-        catch (err) { console.error('Failed to switch audio track:', err); }
-        setShowAudioMenu(false);
-    };
-
-    // ---- MediaFox initialization (video only) ----
+    // ---- Escape chiude il player (le altre scorciatoie le gestisce <movi-player>) ----
     useEffect(() => {
-        if (!isVideo || !canvasRef.current) return;
-
-        let cancelled = false;
-        let player: any = null;
-        const unsubscribers: Array<() => void> = [];
-
-        setIsLoading(true);
-        setError(null);
-        advTime.current = 0;
-        advDuration.current = 0;
-
-        (async () => {
-            try {
-                const { MediaFox } = await import('@mediafox/core');
-                if (cancelled || !canvasRef.current) return;
-
-                player = new MediaFox({ renderTarget: canvasRef.current, volume: isMuted ? 0 : volume });
-                playerRef.current = player;
-
-                let wasPlaying = false;
-                const unsubscribe = player.subscribe((s: any) => {
-                    const playing = !!(s.playing ?? s.state === 'playing');
-                    advTime.current = s.currentTime ?? advTime.current;
-                    setCurrentTime(advTime.current);
-                    if (s.duration) { advDuration.current = s.duration; setDuration(s.duration); }
-                    setIsPlaying(playing);
-                    if (wasPlaying && !playing) saveProgressRef.current();
-                    wasPlaying = playing;
-                });
-                if (typeof unsubscribe === 'function') unsubscribers.push(unsubscribe);
-
-                player.on?.('error', () => {
-                    if (cancelled) return;
-                    setError('The player could not play this file. The format may not be supported.');
-                    setIsLoading(false);
-                });
-
-                await player.load(authorizedStreamUrl);
-                if (cancelled) return;
-
-                const tracks: any[] = player.getAudioTracks?.() ?? [];
-                setAudioTracks(tracks.map((t, i) => ({ id: t.id, label: describeTrack(t, i) })));
-                setSelectedAudio(tracks[0]?.id ?? null);
-
-                const start = extendedFile?.last_pos ?? 0;
-                if (start > 1) await player.seek(start);
-                if (cancelled) return;
-
-                setIsLoading(false);
-                await player.play();
-            } catch (err) {
-                console.error('Advanced player failed:', err);
-                if (!cancelled) {
-                    setError('The player could not load this file. The format may not be supported.');
-                    setIsLoading(false);
-                }
-            }
-        })();
-
-        return () => {
-            cancelled = true;
-            unsubscribers.forEach((u) => u());
-            try { const dispose = player?.dispose ?? player?.destroy; dispose?.call(player); } catch { }
-            playerRef.current = null;
+        const onKey = (e: KeyboardEvent) => {
+            if (error && e.key !== 'Escape') return;
+            if (e.key === 'Escape' && !document.fullscreenElement && !isMinimized) onClose();
+            if (!isVideo && (e.key === ' ' || e.key === 'k')) { e.preventDefault(); togglePlay(); }
+            if (!isVideo && e.key === 'ArrowLeft') { e.preventDefault(); handleSkip(-10); }
+            if (!isVideo && e.key === 'ArrowRight') { e.preventDefault(); handleSkip(10); }
         };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isVideo, file.id]);
-
-    // ---- Fullscreen state ----
-    useEffect(() => {
-        const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
-        document.addEventListener('fullscreenchange', onFsChange);
-        return () => document.removeEventListener('fullscreenchange', onFsChange);
-    }, []);
-
-    // ---- Keyboard shortcuts ----
-    useEffect(() => {
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (error) return;
-            switch (e.key) {
-                case ' ': case 'k': e.preventDefault(); togglePlay(); break;
-                case 'ArrowLeft': case 'j': e.preventDefault(); handleSkip(-10); break;
-                case 'ArrowRight': case 'l': e.preventDefault(); handleSkip(10); break;
-                case 'm': toggleMute(); break;
-                case 'f': toggleFullscreen(); break;
-                case 'Escape':
-                    if (document.fullscreenElement) document.exitFullscreen();
-                    else if (!isMinimized) onClose();
-                    break;
-            }
-        };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isFullscreen, onClose, error, isPlaying, isMinimized, isMuted]);
+    }, [onClose, error, isMinimized, isVideo, isPlaying]);
 
     const handleMouseMove = () => {
         setShowControls(true);
@@ -342,31 +309,27 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     }, [error, file.id, isVideo]);
 
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
-
-    const MediaElement = isVideo ? (
-        <canvas ref={canvasRef} className="w-full h-full object-contain" />
-    ) : (
-        <audio
-            ref={audioRef}
-            src={authorizedStreamUrl}
-            onPlay={handlePlay}
-            onPause={handlePause}
-            onTimeUpdate={handleTimeUpdate}
-            onLoadedMetadata={handleLoadedMetadata}
-            onWaiting={handleWaiting}
-            onPlaying={handlePlaying}
-            onError={handleError}
-        />
-    );
-
     const overlayVisible = showControls || !isPlaying;
+
+    // createElement evita problemi di tipi JSX con elementi custom e con className/class
+    const moviElement = isVideo && moviReady
+        ? React.createElement('movi-player', {
+            key: file.id,
+            ref: moviRef,
+            src: authorizedStreamUrl,
+            controls: '',
+            autoplay: '',
+            theme: 'dark',
+            objectfit: 'contain',
+            style: { width: '100%', height: '100%', display: 'block' },
+        })
+        : null;
 
     return (
         <div
             ref={containerRef}
             className={`fixed transition-all duration-300 ease-in-out z-[100] ${isMinimized ? 'bottom-0 left-0 right-0 h-20 bg-dark-900 border-t border-white/10 shadow-2xl' : 'inset-0 bg-black flex items-center justify-center font-sans'}`}
             onMouseMove={!isMinimized ? handleMouseMove : undefined}
-            onDoubleClick={!isMinimized ? toggleFullscreen : undefined}
         >
             <div className={`w-full h-full ${isMinimized ? 'hidden' : 'flex items-center justify-center'}`}>
                 {error ? (
@@ -383,45 +346,51 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                             <a href={externalUrl} className="btn-secondary flex items-center justify-center gap-2">
                                 <ExternalLink className="w-4 h-4" />Apri URL Diretto
                             </a>
-                            <div className="flex gap-3 mt-2">
-                                <Button
-                                    onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(externalUrl); }}
-                                    className="flex-1 btn-secondary flex items-center justify-center gap-2"
-                                >
-                                    <Copy className="w-4 h-4" />Copia URL
-                                </Button>
-                            </div>
+                            <button
+                                onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(externalUrl); }}
+                                className="btn-secondary flex items-center justify-center gap-2"
+                            >
+                                <Copy className="w-4 h-4" />Copia URL
+                            </button>
                         </div>
                         <button onClick={onClose} className="mt-6 text-dark-400 hover:text-white text-sm transition-colors">Chiudi</button>
                     </div>
+                ) : isVideo ? (
+                    moviElement
                 ) : (
                     <>
-                        {!isVideo && !isMinimized && (
+                        {!isMinimized && (
                             <div className="text-center z-10 glass-panel p-10 animate-scale-in absolute overflow-hidden">
                                 {authorizedThumbnailUrl ? (
-                                    <div className="w-64 h-64 mx-auto mb-6 rounded-2xl bg-dark-800 shadow-2xl overflow-hidden border border-white/10 relative group">
+                                    <div className="w-64 h-64 mx-auto mb-6 rounded-2xl bg-dark-800 shadow-2xl overflow-hidden border border-white/10">
                                         <img
                                             src={authorizedThumbnailUrl}
                                             alt={file.file_name}
-                                            className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+                                            className="w-full h-full object-cover"
                                             onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.parentElement?.classList.add('hidden'); }}
                                         />
-                                        <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent flex items-end justify-center pb-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                                            <span className="text-white text-sm font-medium">Original Artwork</span>
-                                        </div>
                                     </div>
                                 ) : (
-                                    <div className="w-64 h-64 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary-500/20 to-pink-500/20 flex items-center justify-center border border-white/[0.08] shadow-2xl relative overflow-hidden group">
-                                        <div className="absolute inset-0 bg-gradient-to-tr from-primary-500/10 to-transparent animate-pulse"></div>
-                                        <span className="text-8xl transform transition-transform duration-500 group-hover:scale-125 drop-shadow-lg">🎵</span>
+                                    <div className="w-64 h-64 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary-500/20 to-pink-500/20 flex items-center justify-center border border-white/[0.08] shadow-2xl">
+                                        <span className="text-8xl drop-shadow-lg">🎵</span>
                                     </div>
                                 )}
                                 <p className="text-2xl font-bold text-white mb-2 drop-shadow-md">{file.file_name}</p>
                                 <p className="text-primary-400 font-medium">{formatDuration(currentTime)} / {formatDuration(duration)}</p>
                             </div>
                         )}
-                        {MediaElement}
-                        {isLoading && !error && !isMinimized && (
+                        <audio
+                            ref={audioRef}
+                            src={authorizedStreamUrl}
+                            onPlay={handlePlay}
+                            onPause={handlePause}
+                            onTimeUpdate={handleTimeUpdate}
+                            onLoadedMetadata={handleLoadedMetadata}
+                            onWaiting={handleWaiting}
+                            onPlaying={handlePlaying}
+                            onError={handleError}
+                        />
+                        {isLoading && !isMinimized && (
                             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
                                 <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-500"></div>
                             </div>
@@ -434,7 +403,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             {isMinimized && (
                 <div className="max-w-7xl mx-auto flex items-center justify-between gap-4 p-3 h-full">
                     <div className="flex items-center gap-3 overflow-hidden flex-1 cursor-pointer" onClick={() => setMinimized(false)}>
-                        <div className="w-12 h-12 rounded-lg bg-dark-800 flex items-center justify-center flex-shrink-0 overflow-hidden border border-white/5 relative">
+                        <div className="w-12 h-12 rounded-lg bg-dark-800 flex items-center justify-center flex-shrink-0 overflow-hidden border border-white/5">
                             {authorizedThumbnailUrl
                                 ? <img src={authorizedThumbnailUrl} alt="Thumb" className="w-full h-full object-cover" />
                                 : (isVideo ? <span className="text-2xl">🎬</span> : <span className="text-2xl">🎵</span>)}
@@ -446,7 +415,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                     </div>
                     <div className="flex items-center gap-3">
                         <button onClick={(e) => { e.stopPropagation(); handleSkip(-10); }} className="p-2 text-dark-300 hover:text-white"><SkipBack className="w-5 h-5" /></button>
-                        <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} className="p-2 bg-primary-600 rounded-full text-white hover:bg-primary-500 shadow-lg shadow-primary-500/20">
+                        <button onClick={togglePlay} className="p-2 bg-primary-600 rounded-full text-white hover:bg-primary-500 shadow-lg shadow-primary-500/20">
                             {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); handleSkip(10); }} className="p-2 text-dark-300 hover:text-white"><SkipForward className="w-5 h-5" /></button>
@@ -461,144 +430,72 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 </div>
             )}
 
-            {/* Overlay: top bar and custom controls */}
+            {/* Barra superiore: lascia passare i click al player, solo i pulsanti sono cliccabili.
+                Nota: in fullscreen del componente la barra non è visibile (il fullscreen è sull'elemento). */}
             {!error && !isMinimized && (
                 <div
-                    className={`absolute inset-0 transition-opacity duration-300 ${overlayVisible ? 'opacity-100' : 'opacity-0'} ${!overlayVisible ? 'cursor-none' : ''}`}
-                    style={{ pointerEvents: overlayVisible ? 'auto' : 'none' }}
+                    className={`absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 to-transparent flex items-start justify-between z-30 transition-opacity duration-300 pointer-events-none ${overlayVisible ? 'opacity-100' : 'opacity-0'}`}
                 >
-                    <div
-                        className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 to-transparent flex items-start justify-between z-30"
-                        style={{ pointerEvents: overlayVisible ? 'auto' : 'none' }}
-                    >
-                        <div>
-                            <h3 className="text-lg font-medium truncate max-w-lg text-white">{file.file_name}</h3>
-                            {((extendedFile?.last_pos || 0) > 0) && currentTime < 5 && (
-                                <p className="text-xs text-primary-400">Resumed from {formatDuration(extendedFile?.last_pos || 0)}</p>
-                            )}
-                        </div>
-                        <div className="flex items-center gap-2">
-
-                            {/* VLC button */}
-                            {isVideo && (
-                                <a
-                                    href={vlcUrl}
-                                    className="flex items-center gap-2 px-3 py-1.5 bg-primary-600 hover:bg-primary-500 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-primary-500/20"
-                                    title="Apri in VLC (Consigliato per MKV con sottotitoli)"
-                                >
-                                    <MonitorPlay className="w-4 h-4" />
-                                    <span className="hidden sm:inline">Apri in VLC</span>
-                                </a>
-                            )}
-
-                            {/* Audio menu */}
-                            {isVideo && (
-                                <div className="relative ml-2">
-                                    <button
-                                        onClick={() => setShowAudioMenu((v) => !v)}
-                                        className="p-2 text-white hover:bg-white/20 rounded-full transition-colors flex items-center gap-1.5"
-                                        title="Audio tracks"
-                                    >
-                                        <Languages className="w-5 h-5" />
-                                    </button>
-                                    {showAudioMenu && (
-                                        <div className="absolute right-0 top-full mt-2 min-w-[230px] bg-dark-800/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl p-1 z-40">
-                                            <p className="px-3 py-2 text-xs text-dark-400">Audio</p>
-                                            {audioTracks.length === 0 && <p className="px-3 py-2 text-sm text-dark-300">No audio tracks found</p>}
-                                            {audioTracks.map((track) => (
-                                                <button
-                                                    key={String(track.id)}
-                                                    onClick={() => selectAudioTrack(track.id)}
-                                                    className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors hover:bg-white/10 ${selectedAudio === track.id ? 'text-primary-300' : 'text-white'}`}
-                                                >
-                                                    <span className="truncate">{track.label}</span>
-                                                    {selectedAudio === track.id && <Check className="w-4 h-4 shrink-0" />}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            <button onClick={() => setMinimized(true)} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors ml-2" title="Minimize"><ChevronDown className="w-6 h-6" /></button>
-                            <button onClick={onClose} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors"><X className="w-6 h-6" /></button>
-                        </div>
+                    <h3 className="text-lg font-medium truncate max-w-lg text-white">{file.file_name}</h3>
+                    <div className={`flex items-center gap-2 ${overlayVisible ? 'pointer-events-auto' : 'pointer-events-none'}`}>
+                        {isVideo && (
+                            <a
+                                href={vlcUrl}
+                                className="flex items-center gap-2 px-3 py-1.5 bg-primary-600 hover:bg-primary-500 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-primary-500/20"
+                                title="Apri in VLC"
+                            >
+                                <MonitorPlay className="w-4 h-4" />
+                                <span className="hidden sm:inline">Apri in VLC</span>
+                            </a>
+                        )}
+                        <button onClick={() => setMinimized(true)} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors ml-2" title="Minimize"><ChevronDown className="w-6 h-6" /></button>
+                        <button onClick={onClose} className="p-2 text-white hover:bg-white/20 rounded-full transition-colors"><X className="w-6 h-6" /></button>
                     </div>
+                </div>
+            )}
 
-                    {/* Center controls */}
-                    <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex items-center gap-8 z-30">
-                        <button onClick={(e) => { e.stopPropagation(); handleSkip(-10); }} className="p-4 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-all"><SkipBack className="w-8 h-8" /></button>
-                        <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} className="w-20 h-20 bg-white/20 backdrop-blur rounded-full flex items-center justify-center hover:bg-white/30 transition-all scale-100 hover:scale-105">
-                            {isPlaying ? <Pause className="w-10 h-10 text-white" /> : <Play className="w-10 h-10 ml-1 text-white" />}
+            {/* Controlli custom solo per l'audio */}
+            {!isVideo && !error && !isMinimized && (
+                <div
+                    className={`absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30 transition-opacity duration-300 ${overlayVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                >
+                    <div className="flex items-center gap-4 mb-4">
+                        <span className="text-sm font-medium text-white/90 min-w-[50px] font-mono">{formatDuration(Math.floor(currentTime))}</span>
+                        <div className="relative flex-1 h-1 bg-white/20 rounded-full">
+                            <div className="absolute inset-y-0 left-0 bg-primary-500 rounded-full" style={{ width: `${progressPercent}%` }} />
+                            <input
+                                type="range"
+                                min={0}
+                                max={duration || 100}
+                                value={currentTime}
+                                onChange={handleSeek}
+                                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                            />
+                        </div>
+                        <span className="text-sm font-medium text-white/90 min-w-[50px] text-right font-mono">{formatDuration(Math.floor(duration))}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <button onClick={() => handleSkip(-10)} className="p-2 text-white/70 hover:text-white"><SkipBack className="w-6 h-6" /></button>
+                            <button onClick={togglePlay} className="p-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all">
+                                {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
+                            </button>
+                            <button onClick={() => handleSkip(10)} className="p-2 text-white/70 hover:text-white"><SkipForward className="w-6 h-6" /></button>
+                            <button onClick={toggleMute} className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white">
+                                {isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+                            </button>
+                            <input type="range" min={0} max={1} step={0.05} value={isMuted ? 0 : volume} onChange={handleVolumeChange} className="w-24" />
+                        </div>
+                        <button
+                            onClick={cycleSpeed}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${playbackSpeed !== 1 ? 'bg-primary-500/30 text-primary-300 border border-primary-500/40' : 'bg-white/10 text-white/80 border border-white/10 hover:bg-white/20 hover:text-white'}`}
+                            title="Playback Speed"
+                        >
+                            <Gauge className="w-4 h-4" /><span>{playbackSpeed}x</span>
                         </button>
-                        <button onClick={(e) => { e.stopPropagation(); handleSkip(10); }} className="p-4 text-white/50 hover:text-white hover:bg-white/10 rounded-full transition-all"><SkipForward className="w-8 h-8" /></button>
-                    </div>
-
-                    {/* Bottom controls */}
-                    <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-black/95 via-black/70 to-transparent z-30">
-                        <div className="flex items-center gap-4 mb-4 group/progress">
-                            <span className="text-sm font-medium text-white/90 min-w-[50px] font-mono">{formatDuration(Math.floor(currentTime))}</span>
-                            <div className="relative flex-1 h-1 bg-white/20 rounded-full cursor-pointer group-hover/progress:h-2 transition-all">
-                                <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary-500 to-primary-400 rounded-full transition-all" style={{ width: `${progressPercent}%` }}>
-                                    <div className="absolute right-0 top-1/2 transform -translate-y-1/2 w-4 h-4 bg-white rounded-full opacity-0 group-hover/progress:opacity-100 transition-all shadow-lg shadow-primary-500/50 scale-75 group-hover/progress:scale-100"></div>
-                                </div>
-                                <input
-                                    type="range"
-                                    min={0}
-                                    max={duration || 100}
-                                    value={currentTime}
-                                    onChange={handleSeek}
-                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                                />
-                            </div>
-                            <span className="text-sm font-medium text-white/90 min-w-[50px] text-right font-mono">{formatDuration(Math.floor(duration))}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <button onClick={togglePlay} className="p-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-all hover:scale-105">
-                                    {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
-                                </button>
-                                <div className="flex items-center gap-2 group/vol">
-                                    <button onClick={toggleMute} className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all">
-                                        {isMuted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-                                    </button>
-                                    <div className="w-0 overflow-hidden group-hover/vol:w-24 transition-all duration-300">
-                                        <input
-                                            type="range"
-                                            min={0}
-                                            max={1}
-                                            step={0.05}
-                                            value={isMuted ? 0 : volume}
-                                            onChange={handleVolumeChange}
-                                            className="w-20 h-1 bg-white/30 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-lg"
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <button
-                                    onClick={cycleSpeed}
-                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${playbackSpeed !== 1 ? 'bg-primary-500/30 text-primary-300 border border-primary-500/40' : 'bg-white/10 text-white/80 border border-white/10 hover:bg-white/20 hover:text-white'}`}
-                                    title="Playback Speed"
-                                >
-                                    <Gauge className="w-4 h-4" /><span>{playbackSpeed}x</span>
-                                </button>
-                                <button
-                                    onClick={toggleFullscreen}
-                                    className="p-2 rounded-lg hover:bg-white/10 text-white/80 hover:text-white transition-all"
-                                    title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-                                >
-                                    {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
-                                </button>
-                            </div>
-                        </div>
                     </div>
                 </div>
             )}
         </div>
     );
-}
-
-function Button({ onClick, className, children }: { onClick?: (e: any) => void; className?: string; children: React.ReactNode }) {
-    return <button onClick={onClick} className={className}>{children}</button>;
 }

@@ -4,6 +4,7 @@ Streaming API endpoints for media playback.
 
 import re
 import logging
+from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,13 +30,21 @@ router = APIRouter(prefix="/stream", tags=["Streaming"])
 
 
 def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
-    """Parse HTTP Range header for video seeking support."""
+    """Parse HTTP Range header for video seeking support.
+
+    Supports "bytes=a-b", "bytes=a-" and the suffix form "bytes=-n" (last n bytes).
+    """
     if not range_header:
         return 0, file_size - 1
 
-    match = re.match(r"bytes=(\d+)-(\d*)", range_header)
-    if not match:
+    match = re.match(r"bytes=(\d*)-(\d*)", range_header)
+    if not match or (not match.group(1) and not match.group(2)):
         return 0, file_size - 1
+
+    # Suffix range: the last N bytes of the file
+    if not match.group(1):
+        length = int(match.group(2))
+        return max(file_size - length, 0), file_size - 1
 
     start = int(match.group(1))
     end = int(match.group(2)) if match.group(2) else file_size - 1
@@ -43,7 +52,80 @@ def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
     return start, min(end, file_size - 1)
 
 
-@router.get("/{file_id}")
+async def build_stream_response(
+    file: File, request: Request, download: int
+) -> Response:
+    """Shared by the private and the public stream endpoints.
+
+    GET  -> streams the requested byte range from Telegram.
+    HEAD -> only the headers (size, type, range support). Players such as movi-player
+            call HEAD first to learn the file size; it never touches Telegram.
+    """
+    file_size = file.file_size
+
+    # Parse range header
+    range_header = request.headers.get("range")
+    from_bytes, until_bytes = parse_range_header(range_header, file_size)
+
+    # Validate range
+    if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
+        return Response(
+            status_code=416,
+            content="416: Range not satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+
+    req_length = until_bytes - from_bytes + 1
+
+    # Determine content disposition
+    mime_type = file.mime_type or "application/octet-stream"
+    disposition = (
+        "attachment"
+        if download
+        else (
+            "inline"
+            if ("video/" in mime_type or "audio/" in mime_type)
+            else "attachment"
+        )
+    )
+
+    encoded_filename = quote(file.file_name)
+
+    headers = {
+        "Content-Type": mime_type,
+        "Content-Length": str(req_length),
+        "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_filename}",
+        "Accept-Ranges": "bytes",
+    }
+    # Content-Range belongs to partial (206) responses only
+    if range_header:
+        headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
+    status_code = 206 if range_header else 200
+
+    if request.method == "HEAD":
+        return Response(status_code=status_code, headers=headers)
+
+    # Get message from channel
+    message = await get_message_from_channel(file.channel_message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found in channel")
+
+    async def file_streamer():
+        """Generator that streams file chunks from Telegram MTProto."""
+        async for chunk in stream_file_generator(
+            telegram.tg_client, message, from_bytes, until_bytes
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        file_streamer(),
+        status_code=status_code,
+        media_type=mime_type,
+        headers=headers,
+    )
+
+
+@router.api_route("/{file_id}", methods=["GET", "HEAD"])
 async def stream_file(
     file_id: int,
     request: Request,
@@ -61,64 +143,7 @@ async def stream_file(
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
 
-    file_size = file.file_size
-
-    # Parse range header
-    range_header = request.headers.get("range")
-    from_bytes, until_bytes = parse_range_header(range_header, file_size)
-
-    # Validate range
-    if (until_bytes > file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-        return Response(
-            status_code=416,
-            content="416: Range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
-        )
-
-    req_length = until_bytes - from_bytes + 1
-
-    # Get message from channel
-    message = await get_message_from_channel(file.channel_message_id)
-    if not message:
-        raise HTTPException(status_code=404, detail="Message not found in channel")
-
-    async def file_streamer():
-        """Generator that streams file chunks from Telegram MTProto."""
-        async for chunk in stream_file_generator(
-            telegram.tg_client, message, from_bytes, until_bytes
-        ):
-            yield chunk
-
-    # Determine content disposition
-    mime_type = file.mime_type or "application/octet-stream"
-    disposition = (
-        "attachment"
-        if download
-        else (
-            "inline"
-            if ("video/" in mime_type or "audio/" in mime_type)
-            else "attachment"
-        )
-    )
-
-    from urllib.parse import quote
-
-    encoded_filename = quote(file.file_name)
-
-    headers = {
-        "Content-Type": mime_type,
-        "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-        "Content-Length": str(req_length),
-        "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_filename}",
-        "Accept-Ranges": "bytes",
-    }
-
-    return StreamingResponse(
-        file_streamer(),
-        status_code=206 if range_header else 200,
-        media_type=mime_type,
-        headers=headers,
-    )
+    return await build_stream_response(file, request, download)
 
 
 @router.get("/{file_id}/thumbnail")
@@ -219,7 +244,7 @@ async def get_thumbnail(
         raise HTTPException(status_code=500, detail="Failed to get thumbnail")
 
 
-@router.get("/s/{public_hash}")
+@router.api_route("/s/{public_hash}", methods=["GET", "HEAD"])
 @limiter.limit("60/minute")  # Rate limit public streaming to prevent abuse
 async def stream_public_file(
     public_hash: str,
@@ -235,61 +260,4 @@ async def stream_public_file(
     if not file:
         raise HTTPException(status_code=404, detail="File not found or link revoked")
 
-    file_size = file.file_size
-
-    # Parse range header
-    range_header = request.headers.get("range")
-    from_bytes, until_bytes = parse_range_header(range_header, file_size)
-
-    # Validate range
-    if (until_bytes > file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-        return Response(
-            status_code=416,
-            content="416: Range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
-        )
-
-    req_length = until_bytes - from_bytes + 1
-
-    # Get message from channel
-    message = await get_message_from_channel(file.channel_message_id)
-    if not message:
-        raise HTTPException(status_code=404, detail="Message not found in channel")
-
-    async def file_streamer():
-        """Generator that streams file chunks from Telegram MTProto."""
-        async for chunk in stream_file_generator(
-            telegram.tg_client, message, from_bytes, until_bytes
-        ):
-            yield chunk
-
-    # Determine content disposition
-    mime_type = file.mime_type or "application/octet-stream"
-    disposition = (
-        "attachment"
-        if download
-        else (
-            "inline"
-            if ("video/" in mime_type or "audio/" in mime_type)
-            else "attachment"
-        )
-    )
-
-    from urllib.parse import quote
-
-    encoded_filename = quote(file.file_name)
-
-    headers = {
-        "Content-Type": mime_type,
-        "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-        "Content-Length": str(req_length),
-        "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_filename}",
-        "Accept-Ranges": "bytes",
-    }
-
-    return StreamingResponse(
-        file_streamer(),
-        status_code=206 if range_header else 200,
-        media_type=mime_type,
-        headers=headers,
-    )
+    return await build_stream_response(file, request, download)

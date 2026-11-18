@@ -1,18 +1,20 @@
 /**
- * MediaPlayer - versione basata su `movi-player`
+ * MediaPlayer - versione basata su `movi-player` (elemento <movi-player>)
  *
  *   npm i movi-player
  *
- * Video: <movi-player> (FFmpeg/libavformat in WASM + WebCodecs + canvas WebGL2).
- *        Tracce audio, sottotitoli incorporati (SRT/ASS/SSA/VTT/PGS), velocità, fullscreen
- *        e scorciatoie sono gestiti dal componente stesso: qui restano solo la cornice
- *        (titolo, "Apri in VLC", minimizza, chiudi), il salvataggio del progresso e il resume.
- * Audio: UI custom con <audio>, invariata.
+ * Video: <movi-player> (FFmpeg/libavformat in WASM + WebCodecs + canvas).
+ *        Tracce audio, sottotitoli incorporati (SRT/ASS/SSA/VTT/PGS), velocita', fullscreen
+ *        e scorciatoie sono gestiti dal componente stesso (menu a ingranaggio / tasto destro).
+ *        Qui restano solo la cornice (titolo, "Apri in VLC", minimizza, chiudi),
+ *        il salvataggio del progresso e il resume.
+ * Audio: UI custom con <audio>.
  *
- * NOTA: scritto leggendo la documentazione di movi-player (AGENTS.md v0.4.1), non ancora provato.
- * Verifica in particolare: registrazione dell'elemento via `import('movi-player')`,
- * caricamento del file .wasm col tuo bundler, e nomi degli eventi (`timeupdate`, `play`, `pause`,
- * `loadeddata`, `error`).
+ * Gli header COOP/COEP NON servono (opzionali dalla 0.4): non vanno impostati sul server.
+ *
+ * Se un file non parte: il componente mostra il proprio errore (con "Try Software Decoding"
+ * se serve) e la barra in alto resta disponibile con "Apri in VLC". Gli errori vengono
+ * scritti anche nella console del browser con il prefisso "[movi]".
  */
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import {
@@ -141,7 +143,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         import('movi-player')
             .then(() => { if (!cancelled) setMoviReady(true); })
             .catch((err) => {
-                console.error('movi-player failed to load:', err);
+                console.error('[movi] failed to load the library:', err);
                 if (!cancelled) setError('Impossibile caricare il player video.');
             });
         return () => { cancelled = true; };
@@ -156,10 +158,10 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         let lastUi = 0;
         const syncDuration = () => {
             const d = Number(el.duration);
-            if (d && d !== vidDuration.current) { vidDuration.current = d; setDuration(d); }
+            if (d && Number.isFinite(d) && d !== vidDuration.current) { vidDuration.current = d; setDuration(d); }
         };
         const onTime = (e: any) => {
-            const t = typeof e.detail === 'number' ? e.detail : Number(el.currentTime) || 0;
+            const t = typeof e?.detail === 'number' ? e.detail : Number(el.currentTime) || 0;
             vidTime.current = t;
             const now = performance.now();
             if (now - lastUi >= UI_UPDATE_INTERVAL_MS) {
@@ -170,30 +172,37 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         };
         const onPlay = () => setIsPlaying(true);
         const onPause = () => { setIsPlaying(false); saveProgressRef.current(); };
+        const onEnded = () => { setIsPlaying(false); saveProgressRef.current(); };
+        // `loadedmetadata` e' l'evento documentato; `loadeddata` resta come rete di sicurezza
         const onLoaded = () => {
             syncDuration();
             setIsLoading(false);
+            if (resumeApplied.current) return;
             const last = extendedFileRef.current?.last_pos ?? 0;
-            if (!resumeApplied.current && last > 1) {
+            if (last > 1) {
                 const total = vidDuration.current || extendedFileRef.current?.duration || 0;
-                if (!total || last < total * 0.95) el.currentTime = last;
+                if (!total || last < total * 0.95) {
+                    try { el.currentTime = last; } catch (err) { console.error('[movi] resume failed:', err); }
+                }
             }
             resumeApplied.current = true;
         };
-        const onError = (e: any) => {
-            console.error('movi-player error:', e?.detail);
-            setError('Il player non è riuscito a riprodurre questo file.');
-        };
+        // Il componente mostra gia' il suo errore (con "Try Software Decoding"): qui lo scriviamo solo in console.
+        const onError = (e: any) => { console.error('[movi] error:', e?.detail ?? e); };
 
         el.addEventListener('timeupdate', onTime);
         el.addEventListener('play', onPlay);
         el.addEventListener('pause', onPause);
+        el.addEventListener('ended', onEnded);
+        el.addEventListener('loadedmetadata', onLoaded);
         el.addEventListener('loadeddata', onLoaded);
         el.addEventListener('error', onError);
         return () => {
             el.removeEventListener('timeupdate', onTime);
             el.removeEventListener('play', onPlay);
             el.removeEventListener('pause', onPause);
+            el.removeEventListener('ended', onEnded);
+            el.removeEventListener('loadedmetadata', onLoaded);
             el.removeEventListener('loadeddata', onLoaded);
             el.removeEventListener('error', onError);
         };
@@ -259,6 +268,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             const max = vidDuration.current || Infinity;
             const target = Math.min(max, Math.max(0, vidTime.current + seconds));
             el.currentTime = target;
+            vidTime.current = target;
             setCurrentTime(target);
             return;
         }
@@ -277,7 +287,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         setIsMuted(vol === 0);
     };
 
-    // ---- Escape chiude il player (le altre scorciatoie le gestisce <movi-player>) ----
+    // ---- Escape chiude il player (le altre scorciatoie video le gestisce <movi-player>) ----
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
             if (error && e.key !== 'Escape') return;
@@ -311,7 +321,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
     const overlayVisible = showControls || !isPlaying;
 
-    // createElement evita problemi di tipi JSX con elementi custom e con className/class
+    // createElement evita problemi di tipi JSX con elementi custom.
+    // sw="auto": se la decodifica hardware fallisce passa da solo a quella software (FFmpeg WASM).
     const moviElement = isVideo && moviReady
         ? React.createElement('movi-player', {
             key: file.id,
@@ -319,8 +330,12 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             src: authorizedStreamUrl,
             controls: '',
             autoplay: '',
+            sw: 'auto',
             theme: 'dark',
             objectfit: 'contain',
+            fastseek: '',
+            subtitlepicker: '',
+            playsinline: '',
             style: { width: '100%', height: '100%', display: 'block' },
         })
         : null;
@@ -431,7 +446,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             )}
 
             {/* Barra superiore: lascia passare i click al player, solo i pulsanti sono cliccabili.
-                Nota: in fullscreen del componente la barra non è visibile (il fullscreen è sull'elemento). */}
+                Nota: quando il fullscreen e' attivo sull'elemento del player, questa barra non e' visibile. */}
             {!error && !isMinimized && (
                 <div
                     className={`absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/80 to-transparent flex items-start justify-between z-30 transition-opacity duration-300 pointer-events-none ${overlayVisible ? 'opacity-100' : 'opacity-0'}`}

@@ -1,6 +1,7 @@
 """
 FastAPI main application with Telegram MTProto client lifecycle.
 """
+
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -12,14 +13,25 @@ from slowapi.errors import RateLimitExceeded
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
+import mimetypes
 
 import logging
+
 logging.getLogger("pyrogram").setLevel(logging.INFO)
+
+# WebAssembly files must be served as application/wasm (used by movi-player)
+mimetypes.add_type("application/wasm", ".wasm")
 
 from .config import get_settings
 from .database import init_db
 from .telegram import start_telegram_client, stop_telegram_client
-from .routers import files_router, folders_router, streaming_router, auth_router, tv_router
+from .routers import (
+    files_router,
+    folders_router,
+    streaming_router,
+    auth_router,
+    tv_router,
+)
 
 settings = get_settings()
 
@@ -38,9 +50,9 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized")
     await start_telegram_client()
     logger.info("Telegram client started")
-    
+
     yield
-    
+
     logger.info("Shutting down...")
     await stop_telegram_client()
     logger.info("Telegram client stopped")
@@ -81,25 +93,22 @@ app.add_middleware(
 async def add_security_headers(request: Request, call_next):
     """Add security headers to all responses."""
     response = await call_next(request)
-    
+
     # Prevent MIME type sniffing
     response.headers["X-Content-Type-Options"] = "nosniff"
-    
+
     # Prevent clickjacking (allow framing only for same origin)
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    
+
     # XSS protection (legacy but still useful)
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    
+
     # Referrer policy - don't leak URLs
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
-    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
-    
     # Content Security Policy (adjust as needed for your frontend)
     # response.headers["Content-Security-Policy"] = "default-src 'self'"
-    
+
     return response
 
 
@@ -109,9 +118,6 @@ app.include_router(files_router, prefix="/api")
 app.include_router(folders_router, prefix="/api")
 app.include_router(streaming_router, prefix="/api")
 app.include_router(tv_router, prefix="/api")
-
-
-
 
 
 @app.get("/health")
@@ -128,30 +134,40 @@ if os.path.exists("app/static/assets"):
 
 # ... (API routers are included above) ...
 
+
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
     """Serve the React SPA for any non-API routes."""
     # API routes are already handled by routers above
     if full_path == "api" or full_path.startswith("api/"):
         from fastapi import HTTPException
+
         raise HTTPException(status_code=404, detail="API Endpoint not found")
 
     # Check if the file exists in static directory (e.g. logo.png, favicon.ico)
     static_file_path = f"app/static/{full_path}"
     if os.path.exists(static_file_path) and os.path.isfile(static_file_path):
         return FileResponse(static_file_path)
-        
+
+    # A path with a file extension that does not exist is a missing asset, not an SPA route
+    if "." in os.path.basename(full_path):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="File not found")
+
     # Serve index.html for generic SPA routes
     if os.path.exists("app/static/index.html"):
         return FileResponse("app/static/index.html")
-        
+
     return {"message": "Backend running. Frontend not built/mounted (dev mode)."}
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "app.main:app",
         host=settings.server_host,
         port=settings.server_port,
-        reload=True
+        reload=True,
     )
